@@ -1,6 +1,6 @@
 """
 1-Click End-to-End High-Performance Prediction CLI: DBNet + YOLO-seg Hybrid Fusion.
-Optimized with InferenceMode, FP16, Batched Pipeline Execution, and Low Latency Benchmarking.
+Optimized with InferenceMode, FP16, Batched Pipeline Execution, and Side-by-Side Visualizations.
 """
 
 import argparse
@@ -34,14 +34,15 @@ CLASS_COLORS: Dict[str, tuple] = {
 }
 
 
-def draw_labeled_dbnet_polygons(
+def draw_labeled_polygons(
     image: np.ndarray,
     detections: List[Dict[str, Any]],
+    title: str = None,
     card_type: str = None,
     alpha: float = 0.30,
 ) -> np.ndarray:
     """
-    Draw sharp DBNet text polygons labeled with semantic CCCD field names.
+    Draw colored transparent polygon masks with crisp label badges.
     """
     vis_img = image.copy()
     overlay = image.copy()
@@ -63,7 +64,7 @@ def draw_labeled_dbnet_polygons(
     # Draw label badges
     for d in detections:
         label = d.get("label", "text")
-        conf = d.get("text_confidence", d.get("confidence", 0.0))
+        conf = d.get("confidence", d.get("field_confidence", 0.0))
         poly = d.get("polygon", [])
         if not poly:
             continue
@@ -96,22 +97,49 @@ def draw_labeled_dbnet_polygons(
             cv2.LINE_AA,
         )
 
-    # Draw card classification header if available
+    # Draw title / card type badge if provided
+    header_parts = []
+    if title:
+        header_parts.append(title)
     if card_type:
-        header_text = f"CCCD Type: {card_type}"
-        cv2.rectangle(vis_img, (10, 10), (320, 45), (20, 20, 20), -1)
+        header_parts.append(f"Type: {card_type}")
+
+    if header_parts:
+        header_text = " | ".join(header_parts)
+        cv2.rectangle(vis_img, (10, 10), (15 + len(header_text) * 11, 42), (20, 20, 20), -1)
         cv2.putText(
             vis_img,
             header_text,
-            (18, 35),
+            (16, 32),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
+            0.55,
             (0, 255, 255),
-            2,
+            1,
             cv2.LINE_AA,
         )
 
     return vis_img
+
+
+def create_side_by_side_comparison(
+    img_bgr: np.ndarray,
+    raw_yolo_fields: List[Dict[str, Any]],
+    fused_detections: List[Dict[str, Any]],
+    card_type: str = None,
+) -> np.ndarray:
+    """
+    Create a side-by-side composite comparison:
+    Left: Raw YOLO Fields | Right: Fused DBNet Labeled Polygons.
+    """
+    vis_raw = draw_labeled_polygons(img_bgr, raw_yolo_fields, title="1. Raw YOLO Fields", card_type=card_type)
+    vis_fused = draw_labeled_polygons(img_bgr, fused_detections, title="2. DBNet Labeled Polygons", card_type=card_type)
+
+    h, w = img_bgr.shape[:2]
+    divider = np.zeros((h, 8, 3), dtype=np.uint8)
+    divider[:] = (255, 255, 255)
+
+    composite = np.hstack([vis_raw, divider, vis_fused])
+    return composite
 
 
 def predict_pipeline(
@@ -130,7 +158,7 @@ def predict_pipeline(
     save_vis: str = "runs/pipeline",
 ):
     """
-    Run end-to-end pipeline on input image(s) with high-speed batched execution.
+    Run end-to-end pipeline on input image(s) with high-speed batched execution and visualizations.
     """
     pipeline = CCCDDetectionPipeline(
         dbnet_config=dbnet_config,
@@ -172,21 +200,38 @@ def predict_pipeline(
     # Render visualizations if requested
     for res, img_p in zip(all_results, image_paths):
         vis_save_path = None
+        raw_yolo_save_path = None
+        compare_save_path = None
+
+        card_type = res.get("classification", {}).get("card_type", "")
+        detections = res.get("detections", [])
+        raw_fields = res.get("raw_yolo_fields", [])
+
         if vis_dir:
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is not None:
-                vis_img = draw_labeled_dbnet_polygons(
-                    img_bgr, res.get("detections", []), card_type=res.get("classification", {}).get("card_type", "")
-                )
+                # 1. Fused DBNet labeled polygons
+                vis_img = draw_labeled_polygons(img_bgr, detections, title="DBNet Labeled", card_type=card_type)
                 vis_save_path = str(vis_dir / f"fused_{img_p.name}")
                 cv2.imwrite(vis_save_path, vis_img)
 
+                # 2. Raw YOLO field masks
+                raw_img = draw_labeled_polygons(img_bgr, raw_fields, title="Raw YOLO Fields", card_type=card_type)
+                raw_yolo_save_path = str(vis_dir / f"raw_yolo_{img_p.name}")
+                cv2.imwrite(raw_yolo_save_path, raw_img)
+
+                # 3. Side-by-Side comparison
+                comp_img = create_side_by_side_comparison(img_bgr, raw_fields, detections, card_type=card_type)
+                compare_save_path = str(vis_dir / f"compare_{img_p.name}")
+                cv2.imwrite(compare_save_path, comp_img)
+
         res["saved_vis"] = vis_save_path
-        card_type = res.get("classification", {}).get("card_type", "")
-        detections = res.get("detections", [])
+        res["saved_raw_yolo_vis"] = raw_yolo_save_path
+        res["saved_compare_vis"] = compare_save_path
+
         field_summary = [f"{d['label']} ({d['confidence']:.2f})" for d in detections]
         logger.info(
-            f"[{img_p.name}] Type: '{card_type}' | {len(detections)} fields in {res.get('latency_ms', 0):.1f}ms: {field_summary}"
+            f"[{img_p.name}] Type: '{card_type}' | {len(detections)} fields | Vis: {vis_save_path} | Raw YOLO Vis: {raw_yolo_save_path}"
         )
 
     avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0
