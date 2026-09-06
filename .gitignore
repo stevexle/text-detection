@@ -1,0 +1,64 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Datasets & annotations
+data/
+
+# Pretrained & Model weights (Binary checkpoints)
+weights/*
+!weights/.gitkeep
+!weights/*/.gitkeep
+*.pth
+*.pt
+*.onnx
+*.engine
+*.tflite
+
+# Training artifacts, experiment runs & scratch space
+work_dirs/
+runs/
+scratch/
+logs/
+*.log
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Experiment tracking
+wandb/
+mlruns/
+lightning_logs/
+
+# IDE & OS-specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

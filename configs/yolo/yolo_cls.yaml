@@ -1,0 +1,24 @@
+# YOLO26 Document Classification Configuration
+# Classifies card standard and side: front_2021, back_2021, front_2024, back_2024
+
+model:
+  type: "YOLOClassifier"
+  model_path: "weights/yolo/yolo26n-cls.pt"
+  task: "classify"
+
+data:
+  anno_file: "data/labels/dbnet/dataset.jsonl"
+  val_ratio: 0.15
+  split_seed: 42
+  imgsz: 224
+  batch_size: 32
+  num_workers: 4
+
+train:
+  epochs: 30
+  lr0: 0.001
+  optimizer: "AdamW"
+  device: ""                 # Auto (mps, cuda, cpu)
+  project: "work_dirs/yolo_cls"
+  name: "exp"
+  save_best_to: "weights/yolo/yolo26_cls_best.pt"

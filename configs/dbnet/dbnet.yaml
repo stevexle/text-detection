@@ -1,0 +1,89 @@
+# ==============================================================================
+# DBNet (Differentiable Binarization) Universal Configuration for CCCD
+# Single consolidated configuration file with full English documentation.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Model Architecture
+# ------------------------------------------------------------------------------
+model:
+  type: "DBNet"
+  
+  # --- Backbone Selection ---
+  # Option A: ResNet (depth: 18, 34, 50, 101) - Standard & highly accurate
+  backbone:
+    type: "ResNet"
+    depth: 50                  # Default: 50 (Recommended for high accuracy on CCCD)
+    pretrained: true           # Load ImageNet pretrained weights
+    frozen_stages: -1          # Default: -1 (train all). Set to 1 to freeze stem + stage 1
+
+  # Option B: MobileNetV3 (arch: "large" or "small") - Ultra lightweight for mobile/edge
+  # backbone:
+  #   type: "MobileNetV3"
+  #   arch: "large"            # "large" or "small"
+  #   pretrained: true
+  #   frozen_stages: -1        # Set to 1 to freeze stage 1
+
+  # Option C: Any timm backbone (e.g. convnext_tiny, efficientnet_b0)
+  # backbone:
+  #   type: "timm_backbone"
+  #   model_name: "convnext_tiny"
+  #   pretrained: true
+
+  # --- Neck (Feature Pyramid Network) ---
+  neck:
+    type: "FPN"
+    inner_channels: 256        # Set to 128 for MobileNetV3, 256 for ResNet
+
+  # --- Head (Differentiable Binarization Head) ---
+  head:
+    type: "DBHead"
+    k: 50.0                    # Amplification factor for step function
+
+# ------------------------------------------------------------------------------
+# 2. Loss Function
+# ------------------------------------------------------------------------------
+loss:
+  type: "DBLoss"
+  alpha: 1.0                   # Weight for probability binary cross-entropy loss
+  beta: 10.0                   # Weight for threshold L1 loss
+  ohem_ratio: 3.0              # Online Hard Example Mining ratio (neg:pos = 3:1)
+
+# ------------------------------------------------------------------------------
+# 3. Post-Processing (Polygon / Bounding Box Extraction)
+# ------------------------------------------------------------------------------
+postprocess:
+  type: "DBPostProcessor"
+  thresh: 0.3                  # Threshold to binarize probability map
+  box_thresh: 0.6              # Minimum average score to retain a detected text polygon
+  unclip_ratio: 1.5            # Vatti clipping expansion ratio to restore full text box
+  min_size: 3                  # Minimum side length (in pixels) for a valid text box
+  polygon_type: "quad"         # "quad" (4-point bounding box) or "polygon" (arbitrary)
+
+# ------------------------------------------------------------------------------
+# 4. Dataset & Data Loaders (Unified Concise Configuration)
+# ------------------------------------------------------------------------------
+data:
+  data_dir: "data"             # Root directory containing images/ and labels/
+  
+  # Target dataset selection:
+  # - "labels/dbnet/dataset.jsonl" : All 912 CCCD cards (both front & back)
+  # - "labels/dbnet/front.jsonl"   : 648 Front cards only
+  # - "labels/dbnet/back.jsonl"    : 264 Back cards only
+  ann_file: "labels/dbnet/dataset.jsonl"
+
+  val_ratio: 0.15              # Automatic validation split ratio (15% val, 85% train)
+  split_seed: 42               # Seed for deterministic, non-overlapping train/val split
+  target_size: [640, 640]      # Input image resolution [width, height]
+  batch_size: 8                # Training batch size per device
+  num_workers: 2               # DataLoader subprocesses
+
+# ------------------------------------------------------------------------------
+# 5. Optimizer & Training Hyperparameters
+# ------------------------------------------------------------------------------
+optimizer:
+  type: "AdamW"
+  lr: 0.0005                   # Initial learning rate (0.0005 for ResNet-50, 0.001 for ResNet-18)
+  weight_decay: 0.0001         # Weight decay for regularization
+
+epochs: 50                     # Total training epochs

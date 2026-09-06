@@ -1,0 +1,31 @@
+# ==============================================================================
+# Ultralytics YOLO Detection (Bounding Box) Universal Configuration
+# ==============================================================================
+
+# Root directory of dataset
+path: data
+
+dataset: labels/yolo_detect/dataset.txt
+
+# Dynamic validation split configuration (identical to DBNet)
+val_ratio: 0.15
+split_seed: 42
+
+# Compatibility keys for Ultralytics parser
+train: labels/yolo_detect/dataset.txt
+val: labels/yolo_detect/dataset.txt
+
+# 11 Standardized CCCD classes
+nc: 11
+names:
+  0: id
+  1: name
+  2: dob
+  3: gender
+  4: nationality
+  5: origin_place
+  6: current_place
+  7: expire_date
+  8: issue_date
+  9: features
+  10: mrz
