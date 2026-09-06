@@ -304,8 +304,7 @@ uv run python tools/predict_pipeline.py \
         "polygon": [[1110.0, 930.0], [1820.0, 930.0], [1820.10, 1020.0], [1110.0, 1020.0]]
       }
     ],
-    "latency_ms": 40.8,
-    "saved_vis": "runs/pipeline/fused_cccd-minh2.jpg"
+    "latency_ms": 40.8
   }
 ]
 ```

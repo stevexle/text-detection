@@ -227,10 +227,6 @@ def predict_pipeline(
                 compare_save_path = str(vis_dir / f"compare_{img_p.name}")
                 cv2.imwrite(compare_save_path, comp_img)
 
-        res["saved_vis"] = vis_save_path
-        res["saved_raw_yolo_vis"] = raw_yolo_save_path
-        res["saved_compare_vis"] = compare_save_path
-
         field_summary = [f"{d['label']} ({d['confidence']:.2f})" for d in detections]
         logger.info(
             f"[{img_p.name}] Type: '{card_type}' | {len(detections)} fields | Vis: {vis_save_path} | Raw YOLO Vis: {raw_yolo_save_path}"
