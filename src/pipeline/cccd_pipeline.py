@@ -217,7 +217,6 @@ class CCCDDetectionPipeline:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
         return {
-            "image": img_name,
             "classification": card_classification,
             "total_texts": len(fused_texts),
             "detections": fused_texts,
@@ -292,7 +291,6 @@ class CCCDDetectionPipeline:
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
                     results.append({
-                        "image": img_name,
                         "classification": cls_res,
                         "total_texts": len(fused_texts),
                         "detections": fused_texts,

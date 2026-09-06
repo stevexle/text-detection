@@ -7,7 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 import cv2
 import numpy as np
 from tqdm import tqdm
@@ -155,8 +155,8 @@ def predict_pipeline(
     device: str = "",
     fp16: bool = False,
     warmup: bool = True,
-    save_json: str = None,
-    save_vis: str = "runs/pipeline",
+    save_json: str = "runs/pipeline/result.json",
+    save_vis: Optional[str] = None,
 ):
     """
     Run end-to-end pipeline on input image(s) with high-speed batched execution and visualizations.
@@ -191,22 +191,29 @@ def predict_pipeline(
     logger.info(f"Running End-to-End Hybrid Pipeline on {len(image_paths)} image(s) (BatchSize={batch_size})...")
 
     t_start = time.perf_counter()
-    all_results = pipeline.predict_batch(
-        images=image_paths,
-        batch_size=batch_size,
-        min_conf=min_conf,
-        min_overlap=min_overlap,
-    )
+    if len(image_paths) == 1:
+        res = pipeline.predict(
+            image=image_paths[0],
+            min_conf=min_conf,
+            min_overlap=min_overlap,
+        )
+        all_results = [res]
+    else:
+        all_results = pipeline.predict_batch(
+            images=image_paths,
+            batch_size=batch_size,
+            min_conf=min_conf,
+            min_overlap=min_overlap,
+        )
     total_time_s = time.perf_counter() - t_start
 
-    # Render visualizations if requested
-    for res, img_p in zip(all_results, image_paths):
-        vis_save_path = None
-        card_type = res.get("classification", {}).get("card_type", "")
-        detections = res.get("detections", [])
-        raw_fields = res.get("raw_yolo_fields", [])
+    # Render visualizations only if save_vis is explicitly provided
+    if vis_dir:
+        for res, img_p in zip(all_results, image_paths):
+            card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
+            detections = res.get("detections", [])
+            raw_fields = res.get("raw_yolo_fields", [])
 
-        if vis_dir:
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is not None:
                 # Side-by-Side comparison: Left (Raw YOLO Fields) | Right (DBNet Labeled Polygons)
@@ -214,8 +221,12 @@ def predict_pipeline(
                 vis_save_path = str(vis_dir / f"fused_{img_p.name}")
                 cv2.imwrite(vis_save_path, comp_img)
 
+    for res, img_p in zip(all_results, image_paths):
+        card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
+        detections = res.get("detections", [])
+        vis_msg = f" | Vis: {vis_dir / f'fused_{img_p.name}'}" if vis_dir else ""
         logger.info(
-            f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields | Vis: {vis_save_path}"
+            f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields{vis_msg}"
         )
 
     avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0
@@ -226,14 +237,16 @@ def predict_pipeline(
     logger.info(f"Average Latency: {avg_ms:.2f} ms/image | Throughput: {fps:.1f} FPS")
     logger.info("=" * 60)
 
+    output_payload = all_results[0] if len(all_results) == 1 else all_results
+
     if save_json:
         json_path = Path(save_json)
         json_path.parent.mkdir(parents=True, exist_ok=True)
         with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(all_results, f, indent=2, ensure_ascii=False)
+            json.dump(output_payload, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved pipeline results JSON to: {save_json}")
 
-    return all_results
+    return output_payload
 
 
 def main():
@@ -251,7 +264,7 @@ def main():
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 half precision")
     parser.add_argument("--no-warmup", action="store_true", help="Disable warmup")
     parser.add_argument("--save-json", type=str, default="runs/pipeline/result.json", help="Output JSON path")
-    parser.add_argument("--save-vis", type=str, default="runs/pipeline", help="Output visualization directory")
+    parser.add_argument("--save-vis", type=str, default=None, help="Optional output visualization directory")
     args = parser.parse_args()
 
     predict_pipeline(

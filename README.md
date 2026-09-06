@@ -243,10 +243,11 @@ Combines **Document Classification + Field Segmentation + DBNet Text Contour Ext
 
 #### 1-Click Pipeline Execution on an Image:
 ```bash
-uv run python tools/predict_pipeline.py \
-  --source data/cccd-minh2.jpg \
-  --save-vis runs/pipeline/ \
-  --save-json runs/pipeline/result.json
+# Default pure JSON execution (ultra-fast, saves to runs/pipeline/result.json):
+uv run python tools/predict_pipeline.py --source data/cccd-minh2.jpg
+
+# Optional: With side-by-side comparison image output:
+uv run python tools/predict_pipeline.py --source data/cccd-minh2.jpg --save-vis runs/pipeline/
 ```
 
 #### High-Throughput Batch Processing (GPU + FP16):
@@ -255,56 +256,55 @@ uv run python tools/predict_pipeline.py \
   --source data/images/ \
   --batch-size 16 \
   --fp16 \
-  --save-vis runs/pipeline/ \
   --save-json runs/pipeline/result.json
 ```
 
-#### Generated Visualizations:
+#### Generated Visualizations (Optional via `--save-vis`):
 - `runs/pipeline/fused_sample.jpg`: Side-by-side composite comparison (Left: Raw YOLO Fields | Right: Labeled DBNet Text Polygons).
 
 #### Complete Structured Hybrid JSON Output:
 ```json
-[
-  {
-    "image": "cccd-minh2.jpg",
+{
+  "classification": {
     "card_type": "front_2021",
-    "total_texts": 9,
-    "detections": [
-      {
-        "label": "id",
-        "text_confidence": 0.7882,
-        "field_confidence": 0.9850,
-        "confidence": 0.7882,
-        "overlap_ratio": 0.9780,
-        "polygon": [[1118.75, 936.90], [1813.25, 920.10], [1817.25, 1013.10], [1122.75, 1029.90]]
-      },
-      {
-        "label": "name",
-        "text_confidence": 0.7544,
-        "field_confidence": 0.9620,
-        "confidence": 0.7544,
-        "overlap_ratio": 0.9640,
-        "polygon": [[908.00, 1113.00], [1792.00, 1113.00], [1792.00, 1185.00], [908.00, 1185.00]]
-      },
-      {
-        "label": "dob",
-        "text_confidence": 0.8474,
-        "field_confidence": 0.9410,
-        "confidence": 0.8474,
-        "overlap_ratio": 0.9890,
-        "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
-      }
-    ],
-    "raw_yolo_fields": [
-      {
-        "label": "id",
-        "confidence": 0.9850,
-        "polygon": [[1110.0, 930.0], [1820.0, 930.0], [1820.10, 1020.0], [1110.0, 1020.0]]
-      }
-    ],
-    "latency_ms": 40.8
-  }
-]
+    "confidence": 0.9982
+  },
+  "total_texts": 9,
+  "detections": [
+    {
+      "label": "id",
+      "text_confidence": 0.7882,
+      "field_confidence": 0.9850,
+      "confidence": 0.7882,
+      "overlap_ratio": 0.9780,
+      "polygon": [[1118.75, 936.90], [1813.25, 920.10], [1817.25, 1013.10], [1122.75, 1029.90]]
+    },
+    {
+      "label": "name",
+      "text_confidence": 0.7544,
+      "field_confidence": 0.9620,
+      "confidence": 0.7544,
+      "overlap_ratio": 0.9640,
+      "polygon": [[908.00, 1113.00], [1792.00, 1113.00], [1792.00, 1185.00], [908.00, 1185.00]]
+    },
+    {
+      "label": "dob",
+      "text_confidence": 0.8474,
+      "field_confidence": 0.9410,
+      "confidence": 0.8474,
+      "overlap_ratio": 0.9890,
+      "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
+    }
+  ],
+  "raw_yolo_fields": [
+    {
+      "label": "id",
+      "confidence": 0.9850,
+      "polygon": [[1110.0, 930.0], [1820.0, 930.0], [1820.10, 1020.0], [1110.0, 1020.0]]
+    }
+  ],
+  "latency_ms": 40.8
+}
 ```
 
 **JSON Schema Field Definitions:**
