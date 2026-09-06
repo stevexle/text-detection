@@ -10,6 +10,7 @@ Tests:
 
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -19,6 +20,7 @@ import pytest
 from src.models.builder import build_model
 from src.models.wrappers.yolo_classifier import ClassificationResult, YOLOClassifier
 from tools.train_yolo_cls import create_dynamic_cls_staging
+from tools.train_yolo import create_dynamic_yolo_staging
 
 
 class TestClassificationResult(unittest.TestCase):
@@ -205,6 +207,37 @@ class TestDynamicStaging(unittest.TestCase):
             first_link = val_links[0]
             self.assertTrue(first_link.is_symlink())
             self.assertTrue(first_link.resolve().exists())
+
+    def test_dynamic_yolo_seg_staging_creation(self):
+        stage_yaml = create_dynamic_yolo_staging(
+            config_path="configs/yolo/yolo_seg.yaml",
+            val_ratio=0.15,
+            split_seed=42,
+            staging_dir="scratch/test_yolo_seg_stage",
+        )
+        self.assertTrue(stage_yaml.exists())
+        stage_dir = stage_yaml.parent
+        self.assertTrue((stage_dir / "images" / "train").exists())
+        self.assertTrue((stage_dir / "images" / "val").exists())
+        self.assertTrue((stage_dir / "labels" / "train").exists())
+        self.assertTrue((stage_dir / "labels" / "val").exists())
+
+        train_imgs = list((stage_dir / "images" / "train").glob("*.*"))
+        val_imgs = list((stage_dir / "images" / "val").glob("*.*"))
+        train_lbls = list((stage_dir / "labels" / "train").glob("*.txt"))
+        val_lbls = list((stage_dir / "labels" / "val").glob("*.txt"))
+
+        self.assertEqual(len(train_imgs), 776)
+        self.assertEqual(len(val_imgs), 136)
+        self.assertEqual(len(train_lbls), 776)
+        self.assertEqual(len(val_lbls), 136)
+
+        # Verify symlinks
+        self.assertTrue(train_imgs[0].is_symlink())
+        self.assertTrue(train_lbls[0].is_symlink())
+
+        # Cleanup test staging dir
+        shutil.rmtree(stage_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
