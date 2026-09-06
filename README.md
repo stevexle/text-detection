@@ -54,6 +54,10 @@ flowchart TD
   - Automatically maps semantic field labels (`name`, `id`, `dob`,...) to sharp DBNet character polygon contours.
   - Guaranteed Zero-Lost-Field fallback mechanism.
   - GPU/JIT Warmup & `torch.inference_mode()` execution (~40-50 ms / card).
+- **Multi-View Visualizations:**
+  - `fused_{image}.jpg`: Sharp DBNet text contours colored by CCCD field categories.
+  - `raw_yolo_{image}.jpg`: Raw field bounding masks and layout regions from YOLO-seg.
+  - `compare_{image}.jpg`: Side-by-side composite comparison (Raw Fields vs Labeled Text Polygons).
 - **Production Training Engine:**
   - Automatic Mixed Precision (**AMP FP16**) on CUDA and Apple Silicon (**MPS**).
   - Cosine Annealing Learning Rate scheduler with 3-epoch Linear Warmup.
@@ -95,7 +99,7 @@ text_detection/
 │   │   ├── detectors/                # DBNet assembly
 │   │   └── wrappers/                 # YOLOClassifier & YOLOWrapper
 │   ├── pipeline/                     # End-to-End Hybrid Processing Pipeline
-│   │   ├── spatial_matcher.py        # AABB & Polygon Overlap Matching
+│   │   ├── spatial_matcher.py        # AABB & Polygon Overlap Matching with Fallback
 │   │   └── cccd_pipeline.py          # Unified eKYC CCCD Detection Pipeline
 │   ├── postprocess/                  # DBPostProcessor & Vatti Unclipping
 │   └── utils/                        # Config loader, Registry, Logger, Checkpoint helpers
@@ -237,18 +241,15 @@ uv run python tools/predict_yolo.py --weights weights/yolo/yolo26_seg_best.pt --
 
 Combines **Document Classification + Field Segmentation + DBNet Text Contour Extraction + Spatial Matching** into a single 1-click execution. Maps semantic field labels (`id`, `name`, `dob`, `origin_place`,...) onto pixel-sharp DBNet polygon text contours.
 
-#### Run 1-Click Hybrid Pipeline on an Image:
+#### 1-Click Pipeline Execution on an Image:
 ```bash
 uv run python tools/predict_pipeline.py \
   --source data/cccd-minh2.jpg \
-  --dbnet-weights weights/dbnet/dbnet_cccd_best.pth \
-  --yolo-seg-weights weights/yolo/yolo26_seg_best.pt \
-  --yolo-cls-weights weights/yolo/yolo26_cls_best.pt \
   --save-vis runs/pipeline/ \
   --save-json runs/pipeline/result.json
 ```
 
-#### Run High-Throughput Batch Processing (GPU + FP16):
+#### High-Throughput Batch Processing (GPU + FP16):
 ```bash
 uv run python tools/predict_pipeline.py \
   --source data/images/ \
@@ -258,7 +259,12 @@ uv run python tools/predict_pipeline.py \
   --save-json runs/pipeline/result.json
 ```
 
-**Complete Structured Hybrid JSON Output:**
+#### Generated Visualizations:
+- `runs/pipeline/fused_sample.jpg`: Labeled character polygons (DBNet + YOLO).
+- `runs/pipeline/raw_yolo_sample.jpg`: Raw semantic field bounding regions (YOLO-seg).
+- `runs/pipeline/compare_sample.jpg`: Side-by-side composite comparison.
+
+#### Complete Structured Hybrid JSON Output:
 ```json
 [
   {
@@ -291,11 +297,24 @@ uv run python tools/predict_pipeline.py \
         "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
       }
     ],
+    "raw_yolo_fields": [
+      {
+        "label": "id",
+        "confidence": 0.9850,
+        "polygon": [[1110.0, 930.0], [1820.0, 930.0], [1820.10, 1020.0], [1110.0, 1020.0]]
+      }
+    ],
     "latency_ms": 40.8,
     "saved_vis": "runs/pipeline/fused_cccd-minh2.jpg"
   }
 ]
 ```
+
+**JSON Schema Field Definitions:**
+- `text_confidence`: Confidence from DBNet assessing that text characters exist in the polygon.
+- `field_confidence`: Confidence from YOLO confirming the specific CCCD field classification (`id`, `name`, `dob`, `origin_place`,...).
+- `overlap_ratio`: Percentage of spatial intersection between the DBNet text polygon and the YOLO field region.
+- `raw_yolo_fields`: Raw semantic field bounding regions from YOLO-seg for auditing and cropping.
 
 ---
 
