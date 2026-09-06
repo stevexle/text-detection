@@ -136,27 +136,6 @@ bash scripts/download_weights.sh
 
 ---
 
-## 🖥️ Server Training & Local Inference Workflow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as Developer
-    participant Git as GitHub Repo
-    participant Server as GPU Training Server
-    participant Local as Local Machine
-
-    Dev->>Git: Push Code (without data & weights)
-    Server->>Git: git clone repo & uv sync
-    Dev->>Server: SCP / Rsync data/ directory
-    Server->>Server: bash scripts/download_weights.sh
-    Server->>Server: Train Models (DBNet & YOLO26)
-    Server->>Local: SCP best checkpoints (weights/dbnet_cccd_best.pth)
-    Local->>Local: Run Demo & Local Inference (tools/demo.py)
-```
-
----
-
 ## 🚀 Execution & Usage
 
 ### Module 1: Document Classification (YOLO26-cls)
