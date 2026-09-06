@@ -151,6 +151,7 @@ def predict_pipeline(
     batch_size: int = 8,
     min_conf: float = 0.4,
     min_overlap: float = 0.20,
+    unclip_ratio: float = 1.75,
     device: str = "",
     fp16: bool = False,
     warmup: bool = True,
@@ -165,6 +166,7 @@ def predict_pipeline(
         dbnet_weights=dbnet_weights,
         yolo_seg_weights=yolo_seg_weights,
         yolo_cls_weights=yolo_cls_weights,
+        dbnet_unclip_ratio=unclip_ratio,
         device=device,
         fp16=fp16,
     )
@@ -262,6 +264,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=8, help="Batch size for parallel processing")
     parser.add_argument("--min-conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--min-overlap", type=float, default=0.20, help="Minimum overlap ratio for field matching")
+    parser.add_argument("--unclip-ratio", type=float, default=1.75, help="Vatti unclip expansion ratio for punctuation")
     parser.add_argument("--device", type=str, default="", help="Device (mps, cuda, cpu)")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 half precision")
     parser.add_argument("--no-warmup", action="store_true", help="Disable warmup")
@@ -278,6 +281,7 @@ def main():
         batch_size=args.batch_size,
         min_conf=args.min_conf,
         min_overlap=args.min_overlap,
+        unclip_ratio=args.unclip_ratio,
         device=args.device,
         fp16=args.fp16,
         warmup=not args.no_warmup,

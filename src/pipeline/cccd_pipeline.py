@@ -40,6 +40,7 @@ class CCCDDetectionPipeline:
         yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
         yolo_cls_weights: Optional[str] = "weights/yolo/yolo26_cls_best.pt",
         dbnet_box_thresh: float = 0.35,
+        dbnet_unclip_ratio: float = 1.75,
         max_side_len: int = 960,
         device: str = "",
         fp16: bool = False,
@@ -87,10 +88,12 @@ class CCCDDetectionPipeline:
 
         self.db_model.eval()
 
-        # Configurable postprocessor box threshold for high recall
+        # Configurable postprocessor box threshold & unclip expansion ratio
         post_cfg = dict(self.db_cfg.postprocess)
         if dbnet_box_thresh is not None:
             post_cfg["box_thresh"] = dbnet_box_thresh
+        if dbnet_unclip_ratio is not None:
+            post_cfg["unclip_ratio"] = dbnet_unclip_ratio
         self.postprocessor = build_postprocessor(post_cfg)
 
         # 3. Build YOLO Segmentation model
