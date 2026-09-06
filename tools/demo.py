@@ -85,8 +85,10 @@ def predict_demo(
         w_path = Path(f"work_dirs/dbnet/{weights_path}")
 
     if w_path.exists():
-        logger.info(f"Loading weights from {w_path}...")
-        ckpt = torch.load(w_path, map_location=dev)
+        try:
+            ckpt = torch.load(w_path, map_location=dev, weights_only=False)
+        except Exception:
+            ckpt = torch.load(w_path, map_location=dev)
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
             model.load_state_dict(ckpt["model_state_dict"])
         elif isinstance(ckpt, dict):

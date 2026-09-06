@@ -171,8 +171,10 @@ class DBNetTrainer:
             # Forward pass with AMP
             with torch.amp.autocast(device_type=self.amp_device_type, enabled=self.use_amp):
                 preds = self.model(images)
-                loss_dict = self.loss_fn(preds, targets)
-                loss = loss_dict["loss"]
+
+            # Compute multi-task loss in float32 for AMP numerical stability
+            loss_dict = self.loss_fn(preds, targets)
+            loss = loss_dict["loss"]
 
             # Backward pass with scaler
             if self.scaler.is_enabled():
@@ -297,7 +299,10 @@ class DBNetTrainer:
             raise FileNotFoundError(f"Checkpoint not found for resume: {p}")
 
         self.logger.info(f"Resuming training from checkpoint: {p}")
-        checkpoint = torch.load(p, map_location=self.device)
+        try:
+            checkpoint = torch.load(p, map_location=self.device, weights_only=False)
+        except Exception:
+            checkpoint = torch.load(p, map_location=self.device)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
         if self.optimizer and checkpoint.get("optimizer_state_dict"):

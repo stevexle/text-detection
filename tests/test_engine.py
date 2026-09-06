@@ -132,6 +132,25 @@ class TestEngine(unittest.TestCase):
             trainer_new.resume(str(best_ckpt_path))
             self.assertEqual(trainer_new.start_epoch, 2)
 
+    def test_trainer_amp_training(self):
+        """Test DBNet training with AMP mixed precision and safe loss calculation."""
+        train_loader = DataLoader(DummyDataset(size=2), batch_size=2, collate_fn=dummy_collate)
+        optimizer = build_optimizer(self.model, dict(type="AdamW", lr=0.001))
+
+        trainer = DBNetTrainer(
+            model=self.model,
+            loss_fn=self.loss_fn,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            epochs=1,
+            device="cpu",
+            use_amp=True,
+        )
+
+        metrics = trainer.train_epoch(epoch=1)
+        self.assertIn("loss", metrics)
+        self.assertTrue(metrics["loss"] >= 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,10 @@ class DiceLoss(nn.Module):
         Returns:
             Scalar Dice loss (1 - Dice Coefficient)
         """
+        pred = pred.float()
+        target = target.float()
         if mask is not None:
+            mask = mask.float()
             pred = pred * mask
             target = target * mask
 

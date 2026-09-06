@@ -75,7 +75,10 @@ def load_pretrained_weights(
         p = Path(weights_or_path)
         if not p.exists():
             raise FileNotFoundError(f"Pretrained weights file not found: {p}")
-        data = torch.load(p, map_location="cpu")
+        try:
+            data = torch.load(p, map_location="cpu", weights_only=True)
+        except Exception:
+            data = torch.load(p, map_location="cpu", weights_only=False)
     else:
         data = weights_or_path
 

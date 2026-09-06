@@ -4,7 +4,7 @@
 [![PyTorch 2.x](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
 [![Ultralytics YOLO](https://img.shields.io/badge/YOLO-Ultralytics-00FFFF.svg)](https://github.com/ultralytics/ultralytics)
 [![uv Package Manager](https://img.shields.io/badge/uv-fast%20packaging-blueviolet.svg)](https://github.com/astral-sh/uv)
-[![Tests Passing](https://img.shields.io/badge/tests-39%20passed-success.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-40%20passed-success.svg)]()
 
 A high-performance, modular, and production-ready **Text Detection and Document Classification Framework** specifically tailored for Vietnamese Citizen Identity Cards (**CCCD 2021 chip** and **CCCD 2024** standards). Built with modern deep learning backbones (**DBNet**, **YOLO26-cls**, **YOLO26-seg**), Automatic Mixed Precision (AMP FP16), and the standard **ICDAR 2015 Evaluation Protocol**.
 

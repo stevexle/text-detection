@@ -39,8 +39,12 @@ class MaskedSmoothL1Loss(nn.Module):
         Returns:
             Scalar masked L1 loss
         """
+        pred = pred.float()
+        target = target.float()
         if mask is None:
             mask = torch.ones_like(target)
+        else:
+            mask = mask.float()
 
         loss = F.smooth_l1_loss(pred, target, reduction="none", beta=self.beta)
         masked_loss = loss * mask

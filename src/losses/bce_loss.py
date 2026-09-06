@@ -39,12 +39,17 @@ class BalanceCrossEntropyLoss(nn.Module):
         Returns:
             Scalar balanced BCE loss
         """
-        if mask is None:
+        # Cast to float32 for numerical stability in AMP mixed precision
+        pred = pred.float()
+        target = target.float()
+        if mask is not None:
+            mask = mask.float()
+        else:
             mask = torch.ones_like(target)
 
         # Clip predictions for numerical stability
         pred = torch.clamp(pred, self.eps, 1.0 - self.eps)
-        bce = F.binary_cross_entropy(pred, target, reduction="none")
+        bce = -(target * torch.log(pred) + (1.0 - target) * torch.log(1.0 - pred))
 
         pos_mask = (target == 1.0) & (mask == 1.0)
         neg_mask = (target == 0.0) & (mask == 1.0)
