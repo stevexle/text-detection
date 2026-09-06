@@ -10,6 +10,7 @@ Features:
 - Accelerated AABB Spatial Matching.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -106,6 +107,9 @@ class CCCDDetectionPipeline:
             logger.info(f"Initializing YOLO-cls from {yolo_cls_weights}...")
             self.yolo_cls = YOLOClassifier(model_path=yolo_cls_weights, device=self.device_str)
 
+        # Multi-threaded concurrent executor for parallel model forward passes
+        self._executor = ThreadPoolExecutor(max_workers=3)
+
         # Pre-calculated normalization constants
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -171,6 +175,7 @@ class CCCDDetectionPipeline:
     ) -> Dict[str, Any]:
         """
         Process single image with ultra-low latency and dynamic aspect-ratio preservation.
+        Uses concurrent asynchronous execution across YOLO-cls, YOLO-seg, and DBNet.
         """
         start_time = time.perf_counter()
 
@@ -179,34 +184,40 @@ class CCCDDetectionPipeline:
             img_bgr = cv2.imread(str(img_path))
             if img_bgr is None:
                 raise ValueError(f"Could not load image from: {image}")
-            img_name = img_path.name
         else:
             img_bgr = image
-            img_name = "in_memory_image.jpg"
 
         orig_h, orig_w = img_bgr.shape[:2]
 
         with torch.inference_mode():
-            # Step 1: Document Classification
-            card_classification = None
-            if self.yolo_cls is not None:
-                cls_res = self.yolo_cls.classify(img_bgr)
-                card_classification = cls_res if isinstance(cls_res, dict) else cls_res.to_dict()
-
-            # Step 2: YOLO Field Segmentation
-            yolo_fields = self.yolo_seg.detect(
+            # 1. Asynchronously launch YOLO-cls & YOLO-seg in background threads
+            fut_cls = (
+                self._executor.submit(self.yolo_cls.classify, img_bgr)
+                if self.yolo_cls is not None
+                else None
+            )
+            fut_seg = self._executor.submit(
+                self.yolo_seg.detect,
                 image=img_bgr,
                 min_conf=min_conf,
                 device=self.device_str if self.device_str != "mps" else None,
             )
 
-            # Step 3: Aspect-Ratio Preserving DBNet Text Detection
+            # 2. Concurrently execute DBNet forward pass and postprocessing on main thread
             tensor_img, _ = self._preprocess_single(img_bgr)
             preds = self.db_model(tensor_img)
             prob_map = preds["prob_map"][0]
             dbnet_texts = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
 
-            # Step 4: Accelerated Spatial Fusion with Fallback
+            # 3. Retrieve parallel task outputs
+            card_classification = None
+            if fut_cls is not None:
+                cls_res = fut_cls.result()
+                card_classification = cls_res if isinstance(cls_res, dict) else cls_res.to_dict()
+
+            yolo_fields = fut_seg.result()
+
+            # 4. Accelerated Spatial Fusion with Fallback
             fused_texts = match_text_to_fields(
                 text_detections=dbnet_texts,
                 field_detections=yolo_fields,
