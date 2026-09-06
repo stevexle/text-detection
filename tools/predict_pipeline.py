@@ -1,11 +1,12 @@
 """
-1-Click End-to-End Prediction CLI: DBNet + YOLO-seg Hybrid Fusion with Field Labels.
-Runs Document Classification + Field Segmentation + DBNet Text Detection + Spatial Fusion.
+1-Click End-to-End High-Performance Prediction CLI: DBNet + YOLO-seg Hybrid Fusion.
+Optimized with InferenceMode, FP16, Batched Pipeline Execution, and Low Latency Benchmarking.
 """
 
 import argparse
 import json
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Union
 import cv2
 import numpy as np
@@ -119,14 +120,17 @@ def predict_pipeline(
     dbnet_weights: str = "weights/dbnet/dbnet_cccd_best.pth",
     yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
     yolo_cls_weights: str = "weights/yolo/yolo26_cls_best.pt",
+    batch_size: int = 8,
     min_conf: float = 0.4,
     min_overlap: float = 0.20,
     device: str = "",
+    fp16: bool = False,
+    warmup: bool = True,
     save_json: str = None,
     save_vis: str = "runs/pipeline",
 ):
     """
-    Run end-to-end pipeline on input image(s).
+    Run end-to-end pipeline on input image(s) with high-speed batched execution.
     """
     pipeline = CCCDDetectionPipeline(
         dbnet_config=dbnet_config,
@@ -134,7 +138,11 @@ def predict_pipeline(
         yolo_seg_weights=yolo_seg_weights,
         yolo_cls_weights=yolo_cls_weights,
         device=device,
+        fp16=fp16,
     )
+
+    if warmup:
+        pipeline.warmup(num_runs=2)
 
     src_p = Path(source)
     if src_p.is_file():
@@ -150,35 +158,44 @@ def predict_pipeline(
     if vis_dir:
         vis_dir.mkdir(parents=True, exist_ok=True)
 
-    all_results = []
-    logger.info(f"Running End-to-End Hybrid Pipeline on {len(image_paths)} image(s)...")
+    logger.info(f"Running End-to-End Hybrid Pipeline on {len(image_paths)} image(s) (BatchSize={batch_size})...")
 
-    for img_p in tqdm(image_paths, desc="[Processing CCCD Pipeline]", unit="img"):
-        res = pipeline.predict(image=img_p, min_conf=min_conf, min_overlap=min_overlap)
+    t_start = time.perf_counter()
+    all_results = pipeline.predict_batch(
+        images=image_paths,
+        batch_size=batch_size,
+        min_conf=min_conf,
+        min_overlap=min_overlap,
+    )
+    total_time_s = time.perf_counter() - t_start
 
-        card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
-        detections = res.get("detections", [])
-
-        # Visualization
+    # Render visualizations if requested
+    for res, img_p in zip(all_results, image_paths):
         vis_save_path = None
         if vis_dir:
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is not None:
-                vis_img = draw_labeled_dbnet_polygons(img_bgr, detections, card_type=card_type)
+                vis_img = draw_labeled_dbnet_polygons(
+                    img_bgr, res.get("detections", []), card_type=res.get("classification", {}).get("card_type", "")
+                )
                 vis_save_path = str(vis_dir / f"fused_{img_p.name}")
                 cv2.imwrite(vis_save_path, vis_img)
 
-        output_item = {
-            "image": img_p.name,
-            "card_type": card_type,
-            "total_texts": len(detections),
-            "detections": detections,
-            "saved_vis": vis_save_path,
-        }
-        all_results.append(output_item)
-
+        res["saved_vis"] = vis_save_path
+        card_type = res.get("classification", {}).get("card_type", "")
+        detections = res.get("detections", [])
         field_summary = [f"{d['label']} ({d['confidence']:.2f})" for d in detections]
-        logger.info(f"[{img_p.name}] Type: '{card_type}' | Detected {len(detections)} labeled texts: {field_summary}")
+        logger.info(
+            f"[{img_p.name}] Type: '{card_type}' | {len(detections)} fields in {res.get('latency_ms', 0):.1f}ms: {field_summary}"
+        )
+
+    avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0
+    fps = len(image_paths) / total_time_s if total_time_s > 0 else 0.0
+    logger.info("=" * 60)
+    logger.info(f"Pipeline Benchmark Summary:")
+    logger.info(f"Total Images: {len(image_paths)} | Total Time: {total_time_s:.3f}s")
+    logger.info(f"Average Latency: {avg_ms:.2f} ms/image | Throughput: {fps:.1f} FPS")
+    logger.info("=" * 60)
 
     if save_json:
         json_path = Path(save_json)
@@ -191,15 +208,18 @@ def predict_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="End-to-End CCCD DBNet + YOLO-seg Hybrid Pipeline")
+    parser = argparse.ArgumentParser(description="End-to-End High-Performance CCCD Hybrid Pipeline")
     parser.add_argument("--source", type=str, required=True, help="Input image or folder")
     parser.add_argument("--dbnet-config", type=str, default="configs/dbnet/dbnet.yaml", help="DBNet config path")
     parser.add_argument("--dbnet-weights", type=str, default="weights/dbnet/dbnet_cccd_best.pth", help="DBNet weights path")
     parser.add_argument("--yolo-seg-weights", type=str, default="weights/yolo/yolo26_seg_best.pt", help="YOLO-seg weights")
     parser.add_argument("--yolo-cls-weights", type=str, default="weights/yolo/yolo26_cls_best.pt", help="YOLO-cls weights")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for parallel processing")
     parser.add_argument("--min-conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--min-overlap", type=float, default=0.20, help="Minimum overlap ratio for field matching")
     parser.add_argument("--device", type=str, default="", help="Device (mps, cuda, cpu)")
+    parser.add_argument("--fp16", action="store_true", help="Enable FP16 half precision")
+    parser.add_argument("--no-warmup", action="store_true", help="Disable warmup")
     parser.add_argument("--save-json", type=str, default="runs/pipeline/result.json", help="Output JSON path")
     parser.add_argument("--save-vis", type=str, default="runs/pipeline", help="Output visualization directory")
     args = parser.parse_args()
@@ -210,9 +230,12 @@ def main():
         dbnet_weights=args.dbnet_weights,
         yolo_seg_weights=args.yolo_seg_weights,
         yolo_cls_weights=args.yolo_cls_weights,
+        batch_size=args.batch_size,
         min_conf=args.min_conf,
         min_overlap=args.min_overlap,
         device=args.device,
+        fp16=args.fp16,
+        warmup=not args.no_warmup,
         save_json=args.save_json,
         save_vis=args.save_vis,
     )
