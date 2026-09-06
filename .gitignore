@@ -18,8 +18,8 @@ venv/
 ENV/
 env/
 
-# Datasets & annotations
-data/
+# Datasets & raw images (Root data directory only)
+/data/
 
 # Pretrained & Model weights (Binary checkpoints)
 weights/*
