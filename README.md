@@ -255,8 +255,7 @@ uv run python tools/predict_pipeline.py --source data/cccd-minh2.jpg --save-vis 
 uv run python tools/predict_pipeline.py \
   --source data/images/ \
   --batch-size 16 \
-  --fp16 \
-  --save-json runs/pipeline/result.json
+  --fp16
 ```
 
 #### Generated Visualizations (Optional via `--save-vis`):
