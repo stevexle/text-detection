@@ -1,6 +1,7 @@
 """
 High-Performance End-to-End Hybrid CCCD Processing Pipeline.
 Features:
+- Dynamic Aspect-Ratio Preserving Scaling (prevents text compression and word fragmentation).
 - InferenceMode execution with zero memory tracking overhead.
 - Automatic Mixed Precision / Half Precision (FP16) support for GPU / Apple Silicon.
 - High-Throughput Batched Inference (`predict_batch`) for multi-card processing.
@@ -39,6 +40,7 @@ class CCCDDetectionPipeline:
         yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
         yolo_cls_weights: Optional[str] = "weights/yolo/yolo26_cls_best.pt",
         dbnet_box_thresh: float = 0.35,
+        max_side_len: int = 960,
         device: str = "",
         fp16: bool = False,
     ):
@@ -57,6 +59,7 @@ class CCCDDetectionPipeline:
             self.device_str = "cpu"
 
         self.fp16 = fp16 and (self.device_str in ["cuda", "mps"])
+        self.max_side_len = max_side_len
 
         # 2. Build DBNet model
         logger.info(f"Initializing DBNet from {dbnet_weights} on {self.device_str} (FP16={self.fp16})...")
@@ -103,7 +106,6 @@ class CCCDDetectionPipeline:
         # Pre-calculated normalization constants
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        self.target_size = tuple(self.db_cfg.data.target_size)
 
     def warmup(self, num_runs: int = 2):
         """Warm up GPU and JIT execution graphs to eliminate cold-start latency."""
@@ -113,12 +115,39 @@ class CCCDDetectionPipeline:
             _ = self.predict(dummy_img, min_conf=0.5)
         logger.info("Pipeline warmup complete.")
 
+    def _get_dynamic_dims(self, h: int, w: int) -> Tuple[int, int]:
+        """Compute aspect-ratio preserved dimensions divisible by 32."""
+        scale = self.max_side_len / max(h, w)
+        dyn_w = max(32, int(round(w * scale / 32) * 32))
+        dyn_h = max(32, int(round(h * scale / 32) * 32))
+        return dyn_h, dyn_w
+
+    def _preprocess_single(self, img_bgr: np.ndarray) -> Tuple[torch.Tensor, Tuple[int, int]]:
+        """Preprocess single image with aspect-ratio preserving dynamic scaling."""
+        h, w = img_bgr.shape[:2]
+        dyn_h, dyn_w = self._get_dynamic_dims(h, w)
+
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        img_resized = cv2.resize(img_rgb, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
+        norm_img = ((img_resized / 255.0) - self.mean) / self.std
+
+        tensor = torch.from_numpy(norm_img.transpose(2, 0, 1).astype(np.float32)).unsqueeze(0).to(self.device)
+        if self.fp16 and self.device_str == "cuda":
+            tensor = tensor.half()
+        else:
+            tensor = tensor.float()
+        return tensor, (dyn_h, dyn_w)
+
     def _preprocess_batch(self, images: List[np.ndarray]) -> torch.Tensor:
-        """Fast vectorized batch preprocessing for DBNet."""
+        """Vectorized batch preprocessing with uniform max dimensions."""
+        max_h = max(img.shape[0] for img in images)
+        max_w = max(img.shape[1] for img in images)
+        dyn_h, dyn_w = self._get_dynamic_dims(max_h, max_w)
+
         batch_tensors = []
         for img_bgr in images:
             img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            img_resized = cv2.resize(img_rgb, self.target_size, interpolation=cv2.INTER_LINEAR)
+            img_resized = cv2.resize(img_rgb, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
             norm_img = ((img_resized / 255.0) - self.mean) / self.std
             batch_tensors.append(norm_img.transpose(2, 0, 1))
 
@@ -138,7 +167,7 @@ class CCCDDetectionPipeline:
         fallback_unmatched: bool = True,
     ) -> Dict[str, Any]:
         """
-        Process single image with ultra-low latency.
+        Process single image with ultra-low latency and dynamic aspect-ratio preservation.
         """
         start_time = time.perf_counter()
 
@@ -168,8 +197,8 @@ class CCCDDetectionPipeline:
                 device=self.device_str if self.device_str != "mps" else None,
             )
 
-            # Step 3: DBNet Text Detection
-            tensor_img = self._preprocess_batch([img_bgr])
+            # Step 3: Aspect-Ratio Preserving DBNet Text Detection
+            tensor_img, _ = self._preprocess_single(img_bgr)
             preds = self.db_model(tensor_img)
             prob_map = preds["prob_map"][0]
             dbnet_texts = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
@@ -202,7 +231,7 @@ class CCCDDetectionPipeline:
         fallback_unmatched: bool = True,
     ) -> List[Dict[str, Any]]:
         """
-        High-throughput batch processing.
+        High-throughput batch processing with aspect-ratio preserved dynamic scaling.
         """
         results = []
         n_total = len(images)
@@ -236,7 +265,7 @@ class CCCDDetectionPipeline:
                     cls_results = self.yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
                     classifications = [r if isinstance(r, dict) else r.to_dict() for r in cls_results]
 
-                # 2. Batched DBNet Forward Pass
+                # 2. Batched Dynamic DBNet Forward Pass
                 batch_tensor = self._preprocess_batch(loaded_chunk)
                 db_preds = self.db_model(batch_tensor)
                 batch_dbnet_texts = self.postprocessor(db_preds, shape_list=shapes)
