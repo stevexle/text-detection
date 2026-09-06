@@ -51,15 +51,32 @@ def main():
     )
 
     # 3. Save best weights
-    best_weight_p = Path("work_dirs") / ("yolo_seg" if task == "segment" else "yolo_detect") / "exp" / "weights" / "best.pt"
     save_dest = Path(args.save_best_to)
     save_dest.parent.mkdir(parents=True, exist_ok=True)
+    proj_dir = "work_dirs/yolo_seg" if task == "segment" else "work_dirs/yolo_detect"
 
-    if best_weight_p.exists():
-        shutil.copy(best_weight_p, save_dest)
-        logger.info(f"Saved best YOLO weights to: {save_dest}")
-    else:
-        logger.warning(f"best.pt not found at: {best_weight_p}")
+    possible_paths = []
+    if hasattr(model, "trainer") and getattr(model.trainer, "best", None):
+        possible_paths.append(Path(model.trainer.best))
+    if hasattr(model, "trainer") and getattr(model.trainer, "save_dir", None):
+        possible_paths.append(Path(model.trainer.save_dir) / "weights" / "best.pt")
+
+    possible_paths.extend([
+        Path(f"runs/{task}") / proj_dir / "exp" / "weights" / "best.pt",
+        Path(proj_dir) / "exp" / "weights" / "best.pt",
+        Path(f"runs/{task}") / "exp" / "weights" / "best.pt",
+    ])
+
+    saved = False
+    for p in possible_paths:
+        if p.exists():
+            shutil.copy(p, save_dest)
+            logger.info(f"Saved best YOLO weights from {p} to: {save_dest}")
+            saved = True
+            break
+
+    if not saved:
+        logger.warning(f"best.pt not found automatically. Check {possible_paths[0] if possible_paths else 'runs/'}")
 
 
 if __name__ == "__main__":

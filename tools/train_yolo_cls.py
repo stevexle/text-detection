@@ -138,13 +138,31 @@ def main():
     # 4. Save best model to destination
     save_dest = Path(cfg.train.save_best_to)
     save_dest.parent.mkdir(parents=True, exist_ok=True)
-    best_weight_path = Path(cfg.train.project) / cfg.train.name / "weights" / "best.pt"
 
-    if best_weight_path.exists():
-        shutil.copy(best_weight_path, save_dest)
-        logger.info(f"Successfully saved best classification weights to: {save_dest}")
-    else:
-        logger.warning(f"best.pt not found at expected path: {best_weight_path}")
+    possible_paths = []
+    if hasattr(model, "trainer") and getattr(model.trainer, "best", None):
+        possible_paths.append(Path(model.trainer.best))
+    if hasattr(model, "trainer") and getattr(model.trainer, "save_dir", None):
+        possible_paths.append(Path(model.trainer.save_dir) / "weights" / "best.pt")
+    if hasattr(results, "save_dir"):
+        possible_paths.append(Path(results.save_dir) / "weights" / "best.pt")
+
+    possible_paths.extend([
+        Path("runs/classify") / cfg.train.project / cfg.train.name / "weights" / "best.pt",
+        Path(cfg.train.project) / cfg.train.name / "weights" / "best.pt",
+        Path("runs/classify") / cfg.train.name / "weights" / "best.pt",
+    ])
+
+    saved = False
+    for p in possible_paths:
+        if p.exists():
+            shutil.copy(p, save_dest)
+            logger.info(f"Successfully saved best classification weights from {p} to: {save_dest}")
+            saved = True
+            break
+
+    if not saved:
+        logger.warning(f"best.pt not found automatically. Please check {possible_paths[0] if possible_paths else 'runs/'}")
 
 
 if __name__ == "__main__":
