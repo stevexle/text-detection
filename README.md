@@ -4,25 +4,32 @@
 [![PyTorch 2.x](https://img.shields.io/badge/PyTorch-2.x-ee4c2c.svg)](https://pytorch.org/)
 [![Ultralytics YOLO](https://img.shields.io/badge/YOLO-Ultralytics-00FFFF.svg)](https://github.com/ultralytics/ultralytics)
 [![uv Package Manager](https://img.shields.io/badge/uv-fast%20packaging-blueviolet.svg)](https://github.com/astral-sh/uv)
-[![Tests Passing](https://img.shields.io/badge/tests-40%20passed-success.svg)]()
+[![Tests Passing](https://img.shields.io/badge/tests-43%20passed-success.svg)]()
 
-A high-performance, modular, and production-ready **Text Detection and Document Classification Framework** specifically tailored for Vietnamese Citizen Identity Cards (**CCCD 2021 chip** and **CCCD 2024** standards). Built with modern deep learning backbones (**DBNet**, **YOLO26-cls**, **YOLO26-seg**), Automatic Mixed Precision (AMP FP16), and the standard **ICDAR 2015 Evaluation Protocol**.
+A high-performance, modular, and production-ready **Text Detection, Field Segmentation, and Document Classification Framework** specifically tailored for Vietnamese Citizen Identity Cards (**CCCD 2021 chip** and **CCCD 2024** standards). Built with modern deep learning backbones (**DBNet**, **YOLO26-cls**, **YOLO26-seg**), Spatial Matching Hybrid Fusion, Automatic Mixed Precision (AMP FP16), and the standard **ICDAR 2015 Evaluation Protocol**.
 
 ---
 
 ## 🏛️ System Architecture
 
 ```mermaid
-graph TD
-    A["Raw Input Image<br>(CCCD 2021 / 2024)"] --> B["Document Classifier<br>(YOLO26-cls)"]
+flowchart TD
+    A["Raw Input Image<br>(CCCD 2021 / 2024)"] --> B["1. Document Classification<br>(YOLO26-cls)"]
     B -->|"card_type: front_2021 / back_2024"| C["Pipeline Routing Logic"]
-    A --> D["Text Detection Model<br>(DBNet with ResNet-50 / MobileNetV3)"]
-    A --> E["Field Detection Model<br>(YOLO26-seg / YOLO26-detect)"]
-    D --> F["DBPostProcessor<br>(Vatti Polygon Unclipping r=1.5)"]
-    F --> G["Text Polygons & Probabilities"]
-    E --> H["11 Field Bounding Boxes / Masks"]
-    G --> I["Downstream OCR Recognition<br>(VietOCR / CRNN)"]
-    H --> I
+    
+    subgraph "Parallel High-Precision Detection"
+        C --> D["2a. Text Contour Detection<br>(DBNet: ResNet-50 / MobileNetV3)"]
+        C --> E["2b. Field Segmentation<br>(YOLO26-seg / YOLO26-detect)"]
+        
+        D --> D1["DBPostProcessor<br>(Vatti Polygon Unclipping r=1.5)"]
+        E --> E1["11 Field Bounding Masks / Boxes"]
+    end
+    
+    D1 & E1 --> F["3. Spatial Matching & Fusion<br>(AABB Fast-Reject + Polygon Overlap)"]
+    F --> G["Labeled Text Polygons<br>(id, name, dob, origin_place,...)"]
+    
+    G --> H["4. Downstream Text Recognition<br>(VietOCR / CRNN)"]
+    H --> I["Structured eKYC JSON Output"]
 ```
 
 ---
@@ -39,17 +46,20 @@ graph TD
   - Zero-disk-duplication dynamic Train/Val staging via in-memory symbolic links (`scratch/yolo_cls/`).
   - High-throughput vectorized batch inference (`classify_batch`).
   - 1-Line export to ONNX / TensorRT (`export(format="onnx", half=True)`).
+- **Semantic Field Segmentation (YOLO26-seg):**
+  - Segments 11 standardized CCCD information fields: `id`, `name`, `dob`, `gender`, `nationality`, `origin_place`, `current_place`, `expire_date`, `issue_date`, `features`, `mrz`.
+  - Dynamic in-memory Train/Val staging via symlinks (`scratch/yolo_seg/`).
+- **High-Speed Spatial Matching Hybrid Pipeline:**
+  - Fast AABB (Axis-Aligned Bounding Box) filtering + Shapely polygon intersection.
+  - Automatically maps semantic field labels (`name`, `id`, `dob`,...) to sharp DBNet character polygon contours.
+  - Guaranteed Zero-Lost-Field fallback mechanism.
+  - GPU/JIT Warmup & `torch.inference_mode()` execution (~40-50 ms / card).
 - **Production Training Engine:**
   - Automatic Mixed Precision (**AMP FP16**) on CUDA and Apple Silicon (**MPS**).
   - Cosine Annealing Learning Rate scheduler with 3-epoch Linear Warmup.
   - Gradient norm clipping (`max_norm=5.0`) for numerical stability.
   - Periodic and auto-best checkpoint saving based on validation **Hmean (F1-score)**.
   - Full checkpoint resume support (`--resume`).
-  - Interactive, real-time progress logging powered by `tqdm` and `rich`.
-- **ICDAR 2015 Benchmark Metrics:**
-  - Automated Polygon IoU matching ($\ge 0.5$) with `shapely`.
-  - Full support for `ignore_tags` to prevent penalizing unreadable text regions.
-  - Detailed reporting of Precision, Recall, Hmean, Latency (ms), and FPS.
 
 ---
 
@@ -84,6 +94,9 @@ text_detection/
 │   │   ├── heads/                    # DBHead
 │   │   ├── detectors/                # DBNet assembly
 │   │   └── wrappers/                 # YOLOClassifier & YOLOWrapper
+│   ├── pipeline/                     # End-to-End Hybrid Processing Pipeline
+│   │   ├── spatial_matcher.py        # AABB & Polygon Overlap Matching
+│   │   └── cccd_pipeline.py          # Unified eKYC CCCD Detection Pipeline
 │   ├── postprocess/                  # DBPostProcessor & Vatti Unclipping
 │   └── utils/                        # Config loader, Registry, Logger, Checkpoint helpers
 ├── tools/                            # 1-Click Command-Line Tools
@@ -91,13 +104,16 @@ text_detection/
 │   ├── eval.py                       # DBNet ICDAR 2015 evaluation CLI
 │   ├── demo.py                       # DBNet inference & polygon visualization CLI
 │   ├── train_yolo.py                 # YOLO Field Detection / Segmentation training CLI
+│   ├── eval_yolo.py                  # YOLO Detection / Segmentation evaluation CLI
+│   ├── predict_yolo.py               # YOLO Field Detection & visualization CLI
 │   ├── train_yolo_cls.py             # YOLO Document Classification training CLI
 │   ├── eval_yolo_cls.py              # YOLO Document Classification evaluation CLI
-│   └── predict_yolo_cls.py           # YOLO Document Classification inference CLI
+│   ├── predict_yolo_cls.py           # YOLO Document Classification inference CLI
+│   └── predict_pipeline.py           # 1-Click Hybrid Pipeline (DBNet + YOLO Labeled Polygons)
 ├── weights/                          # Pretrained & Best production weights
 │   ├── dbnet/dbnet_cccd_best.pth     # Production DBNet weights
 │   └── yolo/                         # Base & fine-tuned YOLO weights
-├── tests/                            # Comprehensive Unit Test Suite (39/39 passing)
+├── tests/                            # Comprehensive Unit Test Suite (43/43 passing)
 ├── pyproject.toml                    # PEP 517 / PEP 621 package build configuration
 └── README.md
 ```
@@ -121,7 +137,7 @@ uv sync
 # Install package in editable mode
 uv pip install -e .
 
-# Run the complete test suite (39 unit tests)
+# Run the complete test suite (43 unit tests)
 uv run pytest
 ```
 
@@ -194,22 +210,6 @@ uv run python tools/demo.py --source data/images/sample.jpg --output-dir runs/pr
 ```
 *Draws high-visibility polygon overlays and confidence badges, saving visualized outputs to `runs/predict/pred_sample.jpg`.*
 
-**Unified Detection JSON Output (DBNet):**
-```json
-[
-  {
-    "label": "text",
-    "confidence": 0.9842,
-    "polygon": [[214.25, 279.25], [379.75, 279.25], [379.75, 311.75], [214.25, 311.75]]
-  },
-  {
-    "label": "text",
-    "confidence": 0.9615,
-    "polygon": [[214.75, 346.00], [348.25, 346.00], [348.25, 381.00], [214.75, 381.00]]
-  }
-]
-```
-
 ---
 
 ### Module 3: Field Detection & Segmentation (YOLO26-seg)
@@ -221,23 +221,78 @@ Detects and segments the 11 standardized CCCD information fields: `id`, `name`, 
 uv run python tools/train_yolo.py --config configs/yolo/yolo_seg.yaml --epochs 50 --batch-size 16 --imgsz 640
 ```
 
-**Unified Detection JSON Output (YOLO Field Segmentation):**
+#### Evaluate YOLO Segmentation (mAP50 / mAP50-95):
+```bash
+uv run python tools/eval_yolo.py --config configs/yolo/yolo_seg.yaml --weights weights/yolo/yolo26_seg_best.pt
+```
+
+#### Run Field Prediction & Visualization:
+```bash
+uv run python tools/predict_yolo.py --weights weights/yolo/yolo26_seg_best.pt --source data/images/sample.jpg --save-vis runs/predict_yolo/ --save-json fields.json
+```
+
+---
+
+### Module 4: 🌟 End-to-End Hybrid Fusion Pipeline (DBNet + YOLO)
+
+Combines **Document Classification + Field Segmentation + DBNet Text Contour Extraction + Spatial Matching** into a single 1-click execution. Maps semantic field labels (`id`, `name`, `dob`, `origin_place`,...) onto pixel-sharp DBNet polygon text contours.
+
+#### Run 1-Click Hybrid Pipeline on an Image:
+```bash
+uv run python tools/predict_pipeline.py \
+  --source data/cccd-minh2.jpg \
+  --dbnet-weights weights/dbnet/dbnet_cccd_best.pth \
+  --yolo-seg-weights weights/yolo/yolo26_seg_best.pt \
+  --yolo-cls-weights weights/yolo/yolo26_cls_best.pt \
+  --save-vis runs/pipeline/ \
+  --save-json runs/pipeline/result.json
+```
+
+#### Run High-Throughput Batch Processing (GPU + FP16):
+```bash
+uv run python tools/predict_pipeline.py \
+  --source data/images/ \
+  --batch-size 16 \
+  --fp16 \
+  --save-vis runs/pipeline/ \
+  --save-json runs/pipeline/result.json
+```
+
+**Complete Structured Hybrid JSON Output:**
 ```json
 [
   {
-    "label": "id",
-    "confidence": 0.9785,
-    "polygon": [[214.00, 279.00], [380.00, 279.00], [380.00, 312.00], [214.00, 312.00]]
-  },
-  {
-    "label": "name",
-    "confidence": 0.9654,
-    "polygon": [[214.00, 346.00], [348.00, 346.00], [348.00, 381.00], [214.00, 381.00]]
-  },
-  {
-    "label": "current_place",
-    "confidence": 0.9410,
-    "polygon": [[74.00, 138.00], [278.00, 138.00], [278.00, 164.00], [74.00, 164.00]]
+    "image": "cccd-minh2.jpg",
+    "card_type": "front_2021",
+    "total_texts": 9,
+    "detections": [
+      {
+        "label": "id",
+        "text_confidence": 0.7882,
+        "field_confidence": 0.9850,
+        "confidence": 0.7882,
+        "overlap_ratio": 0.9780,
+        "polygon": [[1118.75, 936.90], [1813.25, 920.10], [1817.25, 1013.10], [1122.75, 1029.90]]
+      },
+      {
+        "label": "name",
+        "text_confidence": 0.7544,
+        "field_confidence": 0.9620,
+        "confidence": 0.7544,
+        "overlap_ratio": 0.9640,
+        "polygon": [[908.00, 1113.00], [1792.00, 1113.00], [1792.00, 1185.00], [908.00, 1185.00]]
+      },
+      {
+        "label": "dob",
+        "text_confidence": 0.8474,
+        "field_confidence": 0.9410,
+        "confidence": 0.8474,
+        "overlap_ratio": 0.9890,
+        "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
+      }
+    ],
+    "latency_ms": 40.8,
+    "saved_vis": "runs/pipeline/fused_cccd-minh2.jpg"
   }
 ]
 ```
@@ -253,14 +308,15 @@ uv run pytest -v
 ```
 
 ```text
-============================== 39 passed in 3.82s ==============================
-tests/test_classifier.py ........                                        [ 20%]
-tests/test_data.py ...                                                   [ 28%]
-tests/test_engine.py ...                                                 [ 35%]
+============================== 43 passed in 4.34s ==============================
+tests/test_classifier.py .........                                       [ 20%]
+tests/test_data.py ...                                                   [ 27%]
+tests/test_engine.py ....                                                [ 37%]
 tests/test_losses.py ....                                                [ 46%]
-tests/test_metrics.py .......                                            [ 64%]
-tests/test_models.py .......                                             [ 82%]
-tests/test_postprocess.py ...                                            [ 89%]
+tests/test_metrics.py .......                                            [ 62%]
+tests/test_models.py .......                                             [ 79%]
+tests/test_pipeline.py ..                                                [ 83%]
+tests/test_postprocess.py ...                                            [ 90%]
 tests/test_utils.py ....                                                 [100%]
 ```
 
