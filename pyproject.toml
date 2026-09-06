@@ -27,6 +27,7 @@ dependencies = [
     "torchvision>=0.16.0",
     "tqdm>=4.66.0",
     "ultralytics>=8.2.0",
+    "pi-heif>=0.14.0",
 ]
 
 [tool.hatch.build.targets.wheel]
