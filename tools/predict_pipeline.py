@@ -202,9 +202,6 @@ def predict_pipeline(
     # Render visualizations if requested
     for res, img_p in zip(all_results, image_paths):
         vis_save_path = None
-        raw_yolo_save_path = None
-        compare_save_path = None
-
         card_type = res.get("classification", {}).get("card_type", "")
         detections = res.get("detections", [])
         raw_fields = res.get("raw_yolo_fields", [])
@@ -212,24 +209,13 @@ def predict_pipeline(
         if vis_dir:
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is not None:
-                # 1. Fused DBNet labeled polygons
-                vis_img = draw_labeled_polygons(img_bgr, detections, title="DBNet Labeled", card_type=card_type)
-                vis_save_path = str(vis_dir / f"fused_{img_p.name}")
-                cv2.imwrite(vis_save_path, vis_img)
-
-                # 2. Raw YOLO field masks
-                raw_img = draw_labeled_polygons(img_bgr, raw_fields, title="Raw YOLO Fields", card_type=card_type)
-                raw_yolo_save_path = str(vis_dir / f"raw_yolo_{img_p.name}")
-                cv2.imwrite(raw_yolo_save_path, raw_img)
-
-                # 3. Side-by-Side comparison
+                # Side-by-Side comparison: Left (Raw YOLO Fields) | Right (DBNet Labeled Polygons)
                 comp_img = create_side_by_side_comparison(img_bgr, raw_fields, detections, card_type=card_type)
-                compare_save_path = str(vis_dir / f"compare_{img_p.name}")
-                cv2.imwrite(compare_save_path, comp_img)
+                vis_save_path = str(vis_dir / f"fused_{img_p.name}")
+                cv2.imwrite(vis_save_path, comp_img)
 
-        field_summary = [f"{d['label']} ({d['confidence']:.2f})" for d in detections]
         logger.info(
-            f"[{img_p.name}] Type: '{card_type}' | {len(detections)} fields | Vis: {vis_save_path} | Raw YOLO Vis: {raw_yolo_save_path}"
+            f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields | Vis: {vis_save_path}"
         )
 
     avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0

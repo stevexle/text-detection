@@ -260,9 +260,7 @@ uv run python tools/predict_pipeline.py \
 ```
 
 #### Generated Visualizations:
-- `runs/pipeline/fused_sample.jpg`: Labeled character polygons (DBNet + YOLO).
-- `runs/pipeline/raw_yolo_sample.jpg`: Raw semantic field bounding regions (YOLO-seg).
-- `runs/pipeline/compare_sample.jpg`: Side-by-side composite comparison.
+- `runs/pipeline/fused_sample.jpg`: Side-by-side composite comparison (Left: Raw YOLO Fields | Right: Labeled DBNet Text Polygons).
 
 #### Complete Structured Hybrid JSON Output:
 ```json
