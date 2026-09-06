@@ -4,6 +4,7 @@ Features:
 - InferenceMode execution with zero memory tracking overhead.
 - Automatic Mixed Precision / Half Precision (FP16) support for GPU / Apple Silicon.
 - High-Throughput Batched Inference (`predict_batch`) for multi-card processing.
+- Guaranteed Zero-Lost-Field Fallback (keeps all YOLO fields even if DBNet misses faint text).
 - Pipeline JIT & GPU Warmup to eliminate first-request latency.
 - Accelerated AABB Spatial Matching.
 """
@@ -37,6 +38,7 @@ class CCCDDetectionPipeline:
         dbnet_weights: str = "weights/dbnet/dbnet_cccd_best.pth",
         yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
         yolo_cls_weights: Optional[str] = "weights/yolo/yolo26_cls_best.pt",
+        dbnet_box_thresh: float = 0.35,
         device: str = "",
         fp16: bool = False,
     ):
@@ -81,7 +83,12 @@ class CCCDDetectionPipeline:
             self.db_model = self.db_model.half()
 
         self.db_model.eval()
-        self.postprocessor = build_postprocessor(self.db_cfg.postprocess)
+
+        # Configurable postprocessor box threshold for high recall
+        post_cfg = dict(self.db_cfg.postprocess)
+        if dbnet_box_thresh is not None:
+            post_cfg["box_thresh"] = dbnet_box_thresh
+        self.postprocessor = build_postprocessor(post_cfg)
 
         # 3. Build YOLO Segmentation model
         logger.info(f"Initializing YOLO-seg from {yolo_seg_weights}...")
@@ -128,6 +135,7 @@ class CCCDDetectionPipeline:
         image: Union[str, Path, np.ndarray],
         min_conf: float = 0.4,
         min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
     ) -> Dict[str, Any]:
         """
         Process single image with ultra-low latency.
@@ -166,11 +174,12 @@ class CCCDDetectionPipeline:
             prob_map = preds["prob_map"][0]
             dbnet_texts = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
 
-            # Step 4: Accelerated Spatial Fusion
+            # Step 4: Accelerated Spatial Fusion with Fallback
             fused_texts = match_text_to_fields(
                 text_detections=dbnet_texts,
                 field_detections=yolo_fields,
                 min_overlap_ratio=min_overlap,
+                fallback_unmatched_fields=fallback_unmatched,
             )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -190,10 +199,10 @@ class CCCDDetectionPipeline:
         batch_size: int = 8,
         min_conf: float = 0.4,
         min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         High-throughput batch processing.
-        Processes multiple images in parallel batches across GPU compute streams.
         """
         results = []
         n_total = len(images)
@@ -246,6 +255,7 @@ class CCCDDetectionPipeline:
                         text_detections=db_texts,
                         field_detections=yolo_fields,
                         min_overlap_ratio=min_overlap,
+                        fallback_unmatched_fields=fallback_unmatched,
                     )
                     elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
