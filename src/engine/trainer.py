@@ -94,7 +94,9 @@ class DBNetTrainer:
         use_amp: bool = True,
         cfg: Optional[Dict[str, Any]] = None,
     ):
-        self.logger = get_logger("DBNetTrainer")
+        self.work_dir = Path(work_dir)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.logger = get_logger("DBNetTrainer", log_file=str(self.work_dir / "train.log"))
         self.cfg = cfg or {}
 
         # 1. Device selection
@@ -126,8 +128,6 @@ class DBNetTrainer:
         self.grad_clip_norm = grad_clip_norm
         self.eval_interval = eval_interval
         self.save_interval = save_interval
-        self.work_dir = Path(work_dir)
-        self.work_dir.mkdir(parents=True, exist_ok=True)
         self.best_weight_dest = Path(best_weight_dest)
         self.best_weight_dest.parent.mkdir(parents=True, exist_ok=True)
 

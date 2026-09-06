@@ -17,8 +17,18 @@ def get_logger(
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
 
-    # Avoid duplicate handlers
+    # Check handlers
     if logger.handlers:
+        if log_file:
+            has_file = any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+            if not has_file:
+                log_path = Path(log_file)
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
+                file_handler.setLevel(log_level)
+                file_fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+                file_handler.setFormatter(file_fmt)
+                logger.addHandler(file_handler)
         return logger
 
     # Try to use RichHandler for beautiful terminal output if available
