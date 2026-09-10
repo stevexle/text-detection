@@ -174,4 +174,121 @@ def match_text_to_fields(
                     "polygon": f_coords,
                 })
 
-    return fused_results
+    # 4. Text Line Merging: merge fragmented boxes on the same line
+    return merge_same_line_detections(fused_results)
+
+
+def merge_same_line_detections(
+    detections: List[Dict[str, Any]],
+    y_overlap_thresh: float = 0.50,
+    max_gap_ratio: float = 5.0,
+) -> List[Dict[str, Any]]:
+    """
+    Ultra-fast merger for fragmented text bounding boxes on the same horizontal line.
+    Optimized with single-pass dictionary clustering and unrolled scalar arithmetic (zero-numpy).
+
+    Args:
+        detections: List of detection dicts [{"label": str, "confidence": float, "polygon": [[x,y],...]}]
+        y_overlap_thresh: Minimum vertical overlap ratio to be considered on the same line.
+        max_gap_ratio: Maximum horizontal gap as a multiple of text line height.
+    """
+    if not detections or len(detections) <= 1:
+        return detections
+
+    # 1. Single-pass grouping by label (O(N))
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for d in detections:
+        lbl = d.get("label", "text")
+        if lbl in groups:
+            groups[lbl].append(d)
+        else:
+            groups[lbl] = [d]
+
+    final_dets = []
+
+    # 2. Process each group
+    for label, group in groups.items():
+        if len(group) == 1:
+            final_dets.append(group[0])
+            continue
+
+        # Fast unrolled coordinate extraction without NumPy allocation overhead
+        items: List[List[float]] = []
+        for d in group:
+            poly = d.get("polygon", [])
+            if len(poly) == 4:
+                p0, p1, p2, p3 = poly
+                x1 = min(p0[0], p1[0], p2[0], p3[0])
+                x2 = max(p0[0], p1[0], p2[0], p3[0])
+                y1 = min(p0[1], p1[1], p2[1], p3[1])
+                y2 = max(p0[1], p1[1], p2[1], p3[1])
+            elif len(poly) >= 3:
+                xs = [p[0] for p in poly]
+                ys = [p[1] for p in poly]
+                x1, x2 = min(xs), max(xs)
+                y1, y2 = min(ys), max(ys)
+            else:
+                continue
+
+            items.append([float(x1), float(y1), float(x2), float(y2), float(d.get("confidence", 0.0))])
+
+        if not items:
+            continue
+
+        # Sort top-to-bottom, then left-to-right
+        items.sort(key=lambda it: (it[1], it[0]))
+
+        # In-place line cluster merge
+        merged_lines: List[List[float]] = []  # format: [x1, y1, x2, y2, conf]
+        for it in items:
+            x1, y1, x2, y2, conf = it
+            h_it = y2 - y1
+            merged = False
+
+            for m in merged_lines:
+                m_x1, m_y1, m_x2, m_y2, m_conf = m
+                m_h = m_y2 - m_y1
+
+                # Calculate vertical overlap on Y-axis
+                y_top = max(y1, m_y1)
+                y_bot = min(y2, m_y2)
+                overlap_h = y_bot - y_top
+                min_h = min(h_it, m_h)
+
+                if min_h > 0 and (overlap_h / min_h) >= y_overlap_thresh:
+                    # Same horizontal line: calculate gap between boxes
+                    gap = max(0.0, max(x1, m_x1) - min(x2, m_x2))
+                    avg_h = (h_it + m_h) * 0.5
+
+                    if gap <= avg_h * max_gap_ratio:
+                        m[0] = min(x1, m_x1)
+                        m[1] = min(y1, m_y1)
+                        m[2] = max(x2, m_x2)
+                        m[3] = max(y2, m_y2)
+                        m[4] = (m_conf + conf) * 0.5
+                        merged = True
+                        break
+
+            if not merged:
+                merged_lines.append([x1, y1, x2, y2, conf])
+
+        for m in merged_lines:
+            mx1, my1, mx2, my2, mconf = m
+            final_dets.append({
+                "label": label,
+                "confidence": round(mconf, 4),
+                "polygon": [
+                    [round(mx1, 2), round(my1, 2)],
+                    [round(mx2, 2), round(my1, 2)],
+                    [round(mx2, 2), round(my2, 2)],
+                    [round(mx1, 2), round(my2, 2)],
+                ],
+            })
+
+    # Fast top-to-bottom reading order sort (pure Python tuple indexing)
+    final_dets.sort(key=lambda d: (
+        d["polygon"][0][1] if d.get("polygon") else 0,
+        d["polygon"][0][0] if d.get("polygon") else 0,
+    ))
+
+    return final_dets
