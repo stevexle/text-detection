@@ -54,32 +54,11 @@ class YOLOWrapper(nn.Module):
             raise RuntimeError("Ultralytics YOLO is not initialized.")
         return self.model.predict(source, **kwargs)
 
-    def detect(
-        self,
-        image: Union[str, Path, Any],
-        min_conf: float = 0.5,
-        imgsz: int = 640,
-        **kwargs,
-    ) -> List[Dict[str, Any]]:
-        """
-        Run YOLO detection / segmentation and return results in the unified schema:
-        [
-            {
-                "label": "id",
-                "confidence": 0.9842,
-                "polygon": [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
-            },
-            ...
-        ]
-        """
-        if self.model is None:
-            raise RuntimeError("Ultralytics YOLO is not initialized.")
-
-        results = self.model.predict(source=image, imgsz=imgsz, verbose=False, **kwargs)
-        if not results or len(results) == 0:
+    def _extract_detections(self, res: Any, min_conf: float = 0.5) -> List[Dict[str, Any]]:
+        """Extract detections from an Ultralytics Results object."""
+        if res is None:
             return []
 
-        res = results[0]
         detections = []
         names = res.names
 
@@ -127,6 +106,63 @@ class YOLOWrapper(nn.Module):
                 })
 
         return detections
+
+    def detect(
+        self,
+        image: Union[str, Path, Any],
+        min_conf: float = 0.5,
+        imgsz: int = 640,
+        **kwargs,
+    ) -> List[Dict[str, Any]]:
+        """
+        Run YOLO detection / segmentation on a single image.
+        """
+        if self.model is None:
+            raise RuntimeError("Ultralytics YOLO is not initialized.")
+
+        results = self.model.predict(
+            source=image,
+            imgsz=imgsz,
+            conf=min_conf,
+            verbose=False,
+            **kwargs,
+        )
+        if not results or len(results) == 0:
+            return []
+
+        return self._extract_detections(results[0], min_conf=min_conf)
+
+    def detect_batch(
+        self,
+        images: List[Union[str, Path, Any]],
+        min_conf: float = 0.5,
+        imgsz: int = 640,
+        batch_size: int = 8,
+        **kwargs,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Run high-throughput batched YOLO detection / segmentation.
+        """
+        if not images:
+            return []
+        if self.model is None:
+            raise RuntimeError("Ultralytics YOLO is not initialized.")
+
+        all_detections = []
+        for i in range(0, len(images), batch_size):
+            chunk = images[i : i + batch_size]
+            results = self.model.predict(
+                source=chunk,
+                imgsz=imgsz,
+                conf=min_conf,
+                batch=len(chunk),
+                verbose=False,
+                **kwargs,
+            )
+            for res in results:
+                all_detections.append(self._extract_detections(res, min_conf=min_conf))
+
+        return all_detections
 
     def train(self, data: str, epochs: int = 100, **kwargs) -> Any:
         """Train YOLO model on dataset."""

@@ -109,7 +109,7 @@ text_detection/
 │   ├── demo.py                       # DBNet inference & polygon visualization CLI
 │   ├── train_yolo.py                 # YOLO Field Detection / Segmentation training CLI
 │   ├── eval_yolo.py                  # YOLO Detection / Segmentation evaluation CLI
-│   ├── predict_yolo.py               # YOLO Field Detection & visualization CLI
+│   ├── predict_yolo_pipeline.py      # Pure YOLO End-to-End Pipeline (Classification + Field Segmentation)
 │   ├── train_yolo_cls.py             # YOLO Document Classification training CLI
 │   ├── eval_yolo_cls.py              # YOLO Document Classification evaluation CLI
 │   ├── predict_yolo_cls.py           # YOLO Document Classification inference CLI
@@ -216,7 +216,7 @@ uv run python tools/demo.py --source data/images/sample.jpg --output-dir runs/pr
 
 ---
 
-### Module 3: Field Detection & Segmentation (YOLO26-seg)
+### Module 3: Field Detection & Pure YOLO Pipeline (YOLO26-seg)
 
 Detects and segments the 11 standardized CCCD information fields: `id`, `name`, `dob`, `gender`, `nationality`, `origin_place`, `current_place`, `expire_date`, `issue_date`, `features`, `mrz`.
 
@@ -230,9 +230,13 @@ uv run python tools/train_yolo.py --config configs/yolo/yolo_seg.yaml --epochs 5
 uv run python tools/eval_yolo.py --config configs/yolo/yolo_seg.yaml --weights weights/yolo/yolo26_seg_best.pt
 ```
 
-#### Run Field Prediction & Visualization:
+#### Run Pure YOLO End-to-End Prediction (Classification + Segmentation):
 ```bash
-uv run python tools/predict_yolo.py --source data/images/sample.jpg --save-vis runs/predict_yolo/
+# Default JSON execution (ultra-fast ~60ms Mac / ~5ms GPU):
+uv run python tools/predict_yolo_pipeline.py --source data/cccd-minh2.jpg
+
+# Optional: With field polygon visualization:
+uv run python tools/predict_yolo_pipeline.py --source data/cccd-minh2.jpg --save-vis runs/predict_yolo/
 ```
 
 ---

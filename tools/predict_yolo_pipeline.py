@@ -1,6 +1,7 @@
 """
 Ultra-Fast Pure YOLO End-to-End Prediction CLI: Document Classification + Field Segmentation.
-Runs with ultra-low latency (~60ms on Mac / ~5ms on GPU) without DBNet overhead.
+Optimized with Batched Inference, Fast AABB/Mask Decoding, and Zero-Redundant I/O.
+Runs with ultra-low latency (~50-60ms on Mac / ~5ms on GPU) without DBNet overhead.
 """
 
 import argparse
@@ -15,7 +16,7 @@ from src.models.wrappers.yolo_classifier import YOLOClassifier
 from src.models.wrappers.yolo_wrapper import YOLOWrapper
 from src.utils.logger import get_logger
 
-logger = get_logger("PredictYOLO")
+logger = get_logger("PredictYOLOPipeline")
 
 # Distinct color palette for each CCCD field (BGR format)
 CLASS_COLORS: Dict[str, tuple] = {
@@ -30,15 +31,16 @@ CLASS_COLORS: Dict[str, tuple] = {
     "issue_date": (230, 50, 160),  # Purple-Pink
     "features": (60, 220, 120),    # Emerald
     "mrz": (0, 215, 255),          # Gold / Yellow
-    "text": (0, 255, 0),           # Green fallback
+    "other_text": (160, 160, 160), # Slate Gray
+    "text": (0, 255, 0),           # Bright Green
 }
 
 
 def draw_field_detections(
     image: np.ndarray,
     detections: List[Dict[str, Any]],
-    card_type: str = None,
-    alpha: float = 0.25,
+    card_type: Optional[str] = None,
+    alpha: float = 0.28,
 ) -> np.ndarray:
     """
     Draw colored transparent polygon masks with crisp label badges.
@@ -81,7 +83,7 @@ def draw_field_detections(
         font_scale = 0.45
         thickness = 1
 
-        (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+        (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
         badge_y1 = max(0, y - text_h - 6)
         badge_y2 = y
         badge_x1 = max(0, x)
@@ -117,19 +119,22 @@ def draw_field_detections(
     return vis_img
 
 
-def predict_yolo(
+def predict_yolo_pipeline(
     source: Union[str, Path],
     yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
     yolo_cls_weights: str = "weights/yolo/yolo26_cls_best.pt",
     task: str = "segment",
+    batch_size: int = 8,
     min_conf: float = 0.4,
     imgsz: int = 640,
     device: str = "",
+    warmup: bool = True,
     save_json: str = "runs/predict_yolo/result.json",
     save_vis: Optional[str] = None,
 ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Run high-speed pure YOLO inference (Classification + Segmentation) on image(s).
+    Supports single-image and batched multi-image pipelines.
     """
     yolo_seg = YOLOWrapper(model_path=yolo_seg_weights, task=task)
     yolo_cls = None
@@ -149,10 +154,11 @@ def predict_yolo(
     logger.info(f"Running Pure YOLO Pipeline on {len(image_paths)} image(s)...")
 
     # Warmup models
-    dummy_img = np.zeros((448, 960, 3), dtype=np.uint8)
-    if yolo_cls is not None:
-        _ = yolo_cls.classify(dummy_img)
-    _ = yolo_seg.detect(dummy_img)
+    if warmup:
+        dummy_img = np.zeros((448, 960, 3), dtype=np.uint8)
+        if yolo_cls is not None:
+            _ = yolo_cls.classify(dummy_img)
+        _ = yolo_seg.detect(dummy_img, min_conf=0.5, imgsz=imgsz)
 
     vis_dir = Path(save_vis) if save_vis else None
     if vis_dir:
@@ -161,21 +167,26 @@ def predict_yolo(
     all_results = []
     t_total_start = time.perf_counter()
 
-    for img_p in image_paths:
-        t0 = time.perf_counter()
+    # Optimized Single Image Execution Path
+    if len(image_paths) == 1:
+        img_p = image_paths[0]
         img_bgr = cv2.imread(str(img_p))
         if img_bgr is None:
-            continue
+            raise ValueError(f"Could not load image from: {img_p}")
 
-        # Step 1: Document Classification
+        t0 = time.perf_counter()
         cls_res = None
         card_type = "unknown"
         if yolo_cls is not None:
             cls_res = yolo_cls.classify(img_bgr)
             card_type = cls_res.get("card_type", "unknown") if isinstance(cls_res, dict) else "unknown"
 
-        # Step 2: YOLO Field Segmentation
-        dets = yolo_seg.detect(image=img_bgr, min_conf=min_conf, imgsz=imgsz, device=device if device else None)
+        dets = yolo_seg.detect(
+            image=img_bgr,
+            min_conf=min_conf,
+            imgsz=imgsz,
+            device=device if device else None,
+        )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
         item = {
@@ -186,7 +197,6 @@ def predict_yolo(
         }
         all_results.append(item)
 
-        # Optional visualization
         vis_msg = ""
         if vis_dir:
             vis_img = draw_field_detections(img_bgr, dets, card_type=card_type)
@@ -197,6 +207,63 @@ def predict_yolo(
         logger.info(
             f"Image: {img_p.name} | Type: '{card_type}' | {len(dets)} fields ({elapsed_ms:.1f}ms){vis_msg}"
         )
+
+    # Optimized Batched Execution Path for Multiple Images
+    else:
+        for i in range(0, len(image_paths), batch_size):
+            chunk_paths = image_paths[i : i + batch_size]
+            loaded_chunk = []
+            valid_paths = []
+
+            for p in chunk_paths:
+                bgr = cv2.imread(str(p))
+                if bgr is not None:
+                    loaded_chunk.append(bgr)
+                    valid_paths.append(p)
+
+            if not loaded_chunk:
+                continue
+
+            t0 = time.perf_counter()
+
+            # 1. Batched Document Classification
+            cls_results = [None] * len(loaded_chunk)
+            if yolo_cls is not None:
+                cls_results = yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
+
+            # 2. Batched YOLO Field Detection
+            batch_dets = yolo_seg.detect_batch(
+                images=loaded_chunk,
+                min_conf=min_conf,
+                imgsz=imgsz,
+                batch_size=len(loaded_chunk),
+                device=device if device else None,
+            )
+
+            chunk_elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            per_img_ms = chunk_elapsed_ms / len(loaded_chunk)
+
+            for img_bgr, img_p, cls_res, dets in zip(loaded_chunk, valid_paths, cls_results, batch_dets):
+                card_type = cls_res.get("card_type", "unknown") if isinstance(cls_res, dict) else "unknown"
+
+                item = {
+                    "classification": cls_res,
+                    "total_texts": len(dets),
+                    "detections": dets,
+                    "latency_ms": round(per_img_ms, 2),
+                }
+                all_results.append(item)
+
+                vis_msg = ""
+                if vis_dir:
+                    vis_img = draw_field_detections(img_bgr, dets, card_type=card_type)
+                    vis_save_path = str(vis_dir / f"fused_{img_p.name}")
+                    cv2.imwrite(vis_save_path, vis_img)
+                    vis_msg = f" | Vis: {vis_save_path}"
+
+                logger.info(
+                    f"Image: {img_p.name} | Type: '{card_type}' | {len(dets)} fields ({per_img_ms:.1f}ms){vis_msg}"
+                )
 
     total_time_s = time.perf_counter() - t_total_start
     avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0
@@ -226,21 +293,25 @@ def main():
     parser.add_argument("--yolo-seg-weights", type=str, default="weights/yolo/yolo26_seg_best.pt", help="YOLO-seg weights")
     parser.add_argument("--yolo-cls-weights", type=str, default="weights/yolo/yolo26_cls_best.pt", help="YOLO-cls weights")
     parser.add_argument("--task", type=str, default="segment", choices=["segment", "detect"], help="Task type")
+    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for parallel processing")
     parser.add_argument("--min-conf", type=float, default=0.4, help="Confidence threshold")
     parser.add_argument("--imgsz", type=int, default=640, help="Inference resolution")
     parser.add_argument("--device", type=str, default="", help="Device (mps, cuda, cpu)")
+    parser.add_argument("--no-warmup", action="store_true", help="Disable model warmup")
     parser.add_argument("--save-json", type=str, default="runs/predict_yolo/result.json", help="Output JSON path")
     parser.add_argument("--save-vis", type=str, default=None, help="Optional output visualization directory")
     args = parser.parse_args()
 
-    predict_yolo(
+    predict_yolo_pipeline(
         source=args.source,
         yolo_seg_weights=args.yolo_seg_weights,
         yolo_cls_weights=args.yolo_cls_weights,
         task=args.task,
+        batch_size=args.batch_size,
         min_conf=args.min_conf,
         imgsz=args.imgsz,
         device=args.device,
+        warmup=not args.no_warmup,
         save_json=args.save_json,
         save_vis=args.save_vis,
     )
@@ -248,4 +319,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

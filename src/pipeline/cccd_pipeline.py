@@ -259,7 +259,7 @@ class CCCDDetectionPipeline:
                 continue
 
             with torch.inference_mode():
-                # 1. Batched Classification
+                # 1. Batched Document Classification
                 classifications = [None] * len(loaded_chunk)
                 if self.yolo_cls is not None:
                     cls_results = self.yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
@@ -270,29 +270,29 @@ class CCCDDetectionPipeline:
                 db_preds = self.db_model(batch_tensor)
                 batch_dbnet_texts = self.postprocessor(db_preds, shape_list=shapes)
 
-                # 3. Individual YOLO field detections & spatial fusion
-                for idx, (img_bgr, img_name, orig_shape, db_texts, cls_res) in enumerate(
-                    zip(loaded_chunk, names, shapes, batch_dbnet_texts, classifications)
+                # 3. Batched YOLO Field Detection (Fully parallelized forward pass)
+                batch_yolo_fields = self.yolo_seg.detect_batch(
+                    images=loaded_chunk,
+                    min_conf=min_conf,
+                    batch_size=len(loaded_chunk),
+                    device=self.device_str if self.device_str != "mps" else None,
+                )
+
+                # 4. Fast Spatial Fusion
+                for idx, (db_texts, yolo_fields, cls_res) in enumerate(
+                    zip(batch_dbnet_texts, batch_yolo_fields, classifications)
                 ):
-                    t0 = time.perf_counter()
-                    yolo_fields = self.yolo_seg.detect(
-                        image=img_bgr,
-                        min_conf=min_conf,
-                        device=self.device_str if self.device_str != "mps" else None,
-                    )
                     fused_texts = match_text_to_fields(
                         text_detections=db_texts,
                         field_detections=yolo_fields,
                         min_overlap_ratio=min_overlap,
                         fallback_unmatched_fields=fallback_unmatched,
                     )
-                    elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
                     results.append({
                         "classification": cls_res,
                         "total_texts": len(fused_texts),
                         "detections": fused_texts,
-                        "latency_ms": round(elapsed_ms, 2),
                     })
 
         return results

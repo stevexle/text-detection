@@ -6,10 +6,19 @@ Optimized with AABB fast-rejection, Shapely geometry indexing, and unmatched fie
 from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 from shapely.geometry import Polygon
+from shapely.prepared import prep
 
 
 def _get_aabb(coords: List[List[float]]) -> Tuple[float, float, float, float]:
-    """Compute Axis-Aligned Bounding Box (min_x, min_y, max_x, max_y) fast in pure python."""
+    """Compute Axis-Aligned Bounding Box (min_x, min_y, max_x, max_y) fast."""
+    if len(coords) == 4:
+        p0, p1, p2, p3 = coords
+        return (
+            min(p0[0], p1[0], p2[0], p3[0]),
+            min(p0[1], p1[1], p2[1], p3[1]),
+            max(p0[0], p1[0], p2[0], p3[0]),
+            max(p0[1], p1[1], p2[1], p3[1]),
+        )
     xs = [pt[0] for pt in coords]
     ys = [pt[1] for pt in coords]
     return min(xs), min(ys), max(xs), max(ys)
@@ -80,7 +89,7 @@ def match_text_to_fields(
             ]
         return []
 
-    # 1. Pre-construct Shapely polygons and AABBs for YOLO fields
+    # 1. Pre-construct Shapely polygons, prepared GEOS geometry, and AABBs for YOLO fields
     field_entries = []
     for idx, f in enumerate(field_detections):
         f_coords = f.get("polygon", [])
@@ -89,7 +98,8 @@ def match_text_to_fields(
         f_poly = _to_valid_polygon(f_coords)
         if f_poly is not None and f_poly.area > 0:
             aabb = _get_aabb(f_coords)
-            field_entries.append((idx, f, f_poly, aabb))
+            prep_f = prep(f_poly)
+            field_entries.append((idx, f, f_poly, prep_f, aabb))
 
     matched_field_indices: Set[int] = set()
 
@@ -116,8 +126,10 @@ def match_text_to_fields(
 
         if t_poly is not None and t_poly.area > 0:
             t_area = t_poly.area
-            for f_idx, f_item, f_poly, f_aabb in field_entries:
+            for f_idx, f_item, f_poly, prep_f, f_aabb in field_entries:
                 if not _aabb_intersects(t_aabb, f_aabb):
+                    continue
+                if not prep_f.intersects(t_poly):
                     continue
 
                 try:
@@ -151,7 +163,7 @@ def match_text_to_fields(
 
     # 3. Fallback for unmatched YOLO fields
     if fallback_unmatched_fields:
-        for f_idx, f_item, _, _ in field_entries:
+        for f_idx, f_item, _, _, _ in field_entries:
             if f_idx not in matched_field_indices:
                 f_label = f_item.get("label", "field")
                 f_conf = float(f_item.get("confidence", 0.0))

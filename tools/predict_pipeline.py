@@ -1,6 +1,6 @@
 """
 1-Click End-to-End High-Performance Prediction CLI: DBNet + YOLO-seg Hybrid Fusion.
-Optimized with InferenceMode, FP16, Batched Pipeline Execution, and Side-by-Side Visualizations.
+Optimized with InferenceMode, FP16, Batched Pipeline Execution, and Zero-Redundant I/O.
 """
 
 import argparse
@@ -10,13 +10,13 @@ import time
 from typing import Any, Dict, List, Optional, Union
 import cv2
 import numpy as np
-from tqdm import tqdm
 
 from src.pipeline.cccd_pipeline import CCCDDetectionPipeline
 from src.utils.logger import get_logger
 
 logger = get_logger("PredictPipeline")
 
+# Distinct color palette for each CCCD field (BGR format)
 CLASS_COLORS: Dict[str, tuple] = {
     "id": (255, 105, 65),          # Royal Blue
     "name": (46, 184, 46),         # Vivid Green
@@ -37,9 +37,9 @@ CLASS_COLORS: Dict[str, tuple] = {
 def draw_labeled_polygons(
     image: np.ndarray,
     detections: List[Dict[str, Any]],
-    title: str = None,
-    card_type: str = None,
-    alpha: float = 0.30,
+    title: Optional[str] = None,
+    card_type: Optional[str] = None,
+    alpha: float = 0.28,
 ) -> np.ndarray:
     """
     Draw colored transparent polygon masks with crisp label badges.
@@ -121,27 +121,6 @@ def draw_labeled_polygons(
     return vis_img
 
 
-def create_side_by_side_comparison(
-    img_bgr: np.ndarray,
-    raw_yolo_fields: List[Dict[str, Any]],
-    fused_detections: List[Dict[str, Any]],
-    card_type: str = None,
-) -> np.ndarray:
-    """
-    Create a side-by-side composite comparison:
-    Left: Raw YOLO Fields | Right: Fused DBNet Labeled Polygons.
-    """
-    vis_raw = draw_labeled_polygons(img_bgr, raw_yolo_fields, title="1. Raw YOLO Fields", card_type=card_type)
-    vis_fused = draw_labeled_polygons(img_bgr, fused_detections, title="2. DBNet Labeled Polygons", card_type=card_type)
-
-    h, w = img_bgr.shape[:2]
-    divider = np.zeros((h, 8, 3), dtype=np.uint8)
-    divider[:] = (255, 255, 255)
-
-    composite = np.hstack([vis_raw, divider, vis_fused])
-    return composite
-
-
 def predict_pipeline(
     source: str,
     dbnet_config: str = "configs/dbnet/dbnet.yaml",
@@ -157,7 +136,7 @@ def predict_pipeline(
     warmup: bool = True,
     save_json: str = "runs/pipeline/result.json",
     save_vis: Optional[str] = None,
-):
+) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Run end-to-end pipeline on input image(s) with high-speed batched execution and visualizations.
     """
@@ -191,13 +170,37 @@ def predict_pipeline(
     logger.info(f"Running End-to-End Hybrid Pipeline on {len(image_paths)} image(s) (BatchSize={batch_size})...")
 
     t_start = time.perf_counter()
+
+    # Single Image Optimized Path
     if len(image_paths) == 1:
+        img_p = image_paths[0]
+        img_bgr = cv2.imread(str(img_p))
+        if img_bgr is None:
+            raise ValueError(f"Could not load image from: {img_p}")
+
         res = pipeline.predict(
-            image=image_paths[0],
+            image=img_bgr,
             min_conf=min_conf,
             min_overlap=min_overlap,
         )
         all_results = [res]
+
+        card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
+        detections = res.get("detections", [])
+        latency_ms = res.get("latency_ms", 0.0)
+
+        vis_msg = ""
+        if vis_dir:
+            vis_img = draw_labeled_polygons(img_bgr, detections, title="CCCD Detection", card_type=card_type)
+            vis_save_path = str(vis_dir / f"fused_{img_p.name}")
+            cv2.imwrite(vis_save_path, vis_img)
+            vis_msg = f" | Vis: {vis_save_path}"
+
+        logger.info(
+            f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields ({latency_ms:.1f}ms){vis_msg}"
+        )
+
+    # Batched Execution Path for Multiple Images
     else:
         all_results = pipeline.predict_batch(
             images=image_paths,
@@ -205,30 +208,32 @@ def predict_pipeline(
             min_conf=min_conf,
             min_overlap=min_overlap,
         )
-    total_time_s = time.perf_counter() - t_start
 
-    # Render visualizations only if save_vis is explicitly provided
-    if vis_dir:
+        total_time_s = time.perf_counter() - t_start
+        per_img_ms = (total_time_s / len(image_paths)) * 1000.0
+
         for res, img_p in zip(all_results, image_paths):
+            res["latency_ms"] = round(per_img_ms, 2)
             card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
             detections = res.get("detections", [])
 
-            img_bgr = cv2.imread(str(img_p))
-            if img_bgr is not None:
-                vis_img = draw_labeled_polygons(img_bgr, detections, title="CCCD Detection", card_type=card_type)
-                vis_save_path = str(vis_dir / f"fused_{img_p.name}")
-                cv2.imwrite(vis_save_path, vis_img)
+            vis_msg = ""
+            if vis_dir:
+                img_bgr = cv2.imread(str(img_p))
+                if img_bgr is not None:
+                    vis_img = draw_labeled_polygons(img_bgr, detections, title="CCCD Detection", card_type=card_type)
+                    vis_save_path = str(vis_dir / f"fused_{img_p.name}")
+                    cv2.imwrite(vis_save_path, vis_img)
+                    vis_msg = f" | Vis: {vis_save_path}"
 
-    for res, img_p in zip(all_results, image_paths):
-        card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
-        detections = res.get("detections", [])
-        vis_msg = f" | Vis: {vis_dir / f'fused_{img_p.name}'}" if vis_dir else ""
-        logger.info(
-            f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields{vis_msg}"
-        )
+            logger.info(
+                f"Image: {img_p.name} | Type: '{card_type}' | {len(detections)} fields ({per_img_ms:.1f}ms){vis_msg}"
+            )
 
+    total_time_s = time.perf_counter() - t_start
     avg_ms = (total_time_s / len(image_paths)) * 1000.0 if image_paths else 0.0
     fps = len(image_paths) / total_time_s if total_time_s > 0 else 0.0
+
     logger.info("=" * 60)
     logger.info(f"Pipeline Benchmark Summary:")
     logger.info(f"Total Images: {len(image_paths)} | Total Time: {total_time_s:.3f}s")
