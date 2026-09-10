@@ -219,7 +219,6 @@ class CCCDDetectionPipeline:
             "classification": card_classification,
             "total_texts": len(fused_texts),
             "detections": fused_texts,
-            "raw_yolo_fields": yolo_fields,
             "latency_ms": round(elapsed_ms, 2),
         }
 
@@ -293,7 +292,6 @@ class CCCDDetectionPipeline:
                         "classification": cls_res,
                         "total_texts": len(fused_texts),
                         "detections": fused_texts,
-                        "raw_yolo_fields": yolo_fields,
                         "latency_ms": round(elapsed_ms, 2),
                     })
 

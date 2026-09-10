@@ -286,20 +286,15 @@ uv run python tools/predict_pipeline.py \
       "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
     }
   ],
-  "raw_yolo_fields": [
-    {
-      "label": "id",
-      "confidence": 0.9850,
-      "polygon": [[1110.0, 930.0], [1820.0, 930.0], [1820.10, 1020.0], [1110.0, 1020.0]]
-    }
-  ],
   "latency_ms": 40.8
 }
 ```
 
 **JSON Schema Field Definitions:**
+- `classification`: Card type classification (`front_2021`, `back_2021`, `front_2024`, `back_2024`) and confidence score.
+- `total_texts`: Total number of detected text polygon segments.
 - `detections`: Fused character polygon detections with semantic field labels (`id`, `name`, `dob`, `origin_place`,...) and confidence score.
-- `raw_yolo_fields`: Raw semantic field bounding regions from YOLO-seg for auditing and cropping.
+- `latency_ms`: Total execution time for the image in milliseconds.
 
 ---
 

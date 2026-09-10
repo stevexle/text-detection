@@ -212,14 +212,12 @@ def predict_pipeline(
         for res, img_p in zip(all_results, image_paths):
             card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
             detections = res.get("detections", [])
-            raw_fields = res.get("raw_yolo_fields", [])
 
             img_bgr = cv2.imread(str(img_p))
             if img_bgr is not None:
-                # Side-by-Side comparison: Left (Raw YOLO Fields) | Right (DBNet Labeled Polygons)
-                comp_img = create_side_by_side_comparison(img_bgr, raw_fields, detections, card_type=card_type)
+                vis_img = draw_labeled_polygons(img_bgr, detections, title="CCCD Detection", card_type=card_type)
                 vis_save_path = str(vis_dir / f"fused_{img_p.name}")
-                cv2.imwrite(vis_save_path, comp_img)
+                cv2.imwrite(vis_save_path, vis_img)
 
     for res, img_p in zip(all_results, image_paths):
         card_type = res.get("classification", {}).get("card_type", "") if res.get("classification") else ""
