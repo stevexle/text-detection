@@ -232,7 +232,7 @@ uv run python tools/eval_yolo.py --config configs/yolo/yolo_seg.yaml --weights w
 
 #### Run Field Prediction & Visualization:
 ```bash
-uv run python tools/predict_yolo.py --weights weights/yolo/yolo26_seg_best.pt --source data/images/sample.jpg --save-vis runs/predict_yolo/ --save-json fields.json
+uv run python tools/predict_yolo.py --source data/images/sample.jpg --save-vis runs/predict_yolo/
 ```
 
 ---
