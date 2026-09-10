@@ -64,7 +64,7 @@ def draw_labeled_polygons(
     # Draw label badges
     for d in detections:
         label = d.get("label", "text")
-        conf = d.get("confidence", d.get("field_confidence", 0.0))
+        conf = d.get("confidence", 0.0)
         poly = d.get("polygon", [])
         if not poly:
             continue

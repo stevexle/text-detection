@@ -16,10 +16,7 @@ class TestSpatialMatcher(unittest.TestCase):
             [
                 {
                     "label": "text",
-                    "text_confidence": 0.9,
-                    "field_confidence": 0.0,
                     "confidence": 0.9,
-                    "overlap_ratio": 0.0,
                     "polygon": [[0, 0], [10, 0], [10, 10], [0, 10]],
                 }
             ],
@@ -59,18 +56,15 @@ class TestSpatialMatcher(unittest.TestCase):
 
         # First text polygon is inside "id"
         self.assertEqual(fused[0]["label"], "id")
-        self.assertEqual(fused[0]["text_confidence"], 0.88)
-        self.assertEqual(fused[0]["field_confidence"], 0.99)
-        self.assertGreaterEqual(fused[0]["overlap_ratio"], 0.9)
+        self.assertEqual(fused[0]["confidence"], 0.88)
 
         # Second text polygon is inside "name"
         self.assertEqual(fused[1]["label"], "name")
-        self.assertEqual(fused[1]["text_confidence"], 0.92)
-        self.assertEqual(fused[1]["field_confidence"], 0.95)
+        self.assertEqual(fused[1]["confidence"], 0.92)
 
         # Third text polygon has no overlapping field -> "other_text"
         self.assertEqual(fused[2]["label"], "other_text")
-        self.assertEqual(fused[2]["field_confidence"], 0.0)
+        self.assertEqual(fused[2]["confidence"], 0.75)
 
 
 if __name__ == "__main__":

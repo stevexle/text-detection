@@ -272,26 +272,17 @@ uv run python tools/predict_pipeline.py \
   "detections": [
     {
       "label": "id",
-      "text_confidence": 0.7882,
-      "field_confidence": 0.9850,
       "confidence": 0.7882,
-      "overlap_ratio": 0.9780,
       "polygon": [[1118.75, 936.90], [1813.25, 920.10], [1817.25, 1013.10], [1122.75, 1029.90]]
     },
     {
       "label": "name",
-      "text_confidence": 0.7544,
-      "field_confidence": 0.9620,
       "confidence": 0.7544,
-      "overlap_ratio": 0.9640,
       "polygon": [[908.00, 1113.00], [1792.00, 1113.00], [1792.00, 1185.00], [908.00, 1185.00]]
     },
     {
       "label": "dob",
-      "text_confidence": 0.8474,
-      "field_confidence": 0.9410,
       "confidence": 0.8474,
-      "overlap_ratio": 0.9890,
       "polygon": [[1500.00, 1188.00], [1844.00, 1188.00], [1844.00, 1260.00], [1500.00, 1260.00]]
     }
   ],
@@ -307,9 +298,7 @@ uv run python tools/predict_pipeline.py \
 ```
 
 **JSON Schema Field Definitions:**
-- `text_confidence`: Confidence from DBNet assessing that text characters exist in the polygon.
-- `field_confidence`: Confidence from YOLO confirming the specific CCCD field classification (`id`, `name`, `dob`, `origin_place`,...).
-- `overlap_ratio`: Percentage of spatial intersection between the DBNet text polygon and the YOLO field region.
+- `detections`: Fused character polygon detections with semantic field labels (`id`, `name`, `dob`, `origin_place`,...) and confidence score.
 - `raw_yolo_fields`: Raw semantic field bounding regions from YOLO-seg for auditing and cropping.
 
 ---

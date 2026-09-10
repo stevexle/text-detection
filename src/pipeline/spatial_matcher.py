@@ -62,10 +62,7 @@ def match_text_to_fields(
         return [
             {
                 "label": "text",
-                "text_confidence": round(d.get("confidence", 0.0), 4),
-                "field_confidence": 0.0,
                 "confidence": round(d.get("confidence", 0.0), 4),
-                "overlap_ratio": 0.0,
                 "polygon": d.get("polygon", []),
             }
             for d in text_detections
@@ -76,10 +73,7 @@ def match_text_to_fields(
             return [
                 {
                     "label": f.get("label", "field"),
-                    "text_confidence": 0.0,
-                    "field_confidence": round(float(f.get("confidence", 0.0)), 4),
                     "confidence": round(float(f.get("confidence", 0.0)), 4),
-                    "overlap_ratio": 0.0,
                     "polygon": f.get("polygon", []),
                 }
                 for f in field_detections
@@ -108,10 +102,7 @@ def match_text_to_fields(
         if len(t_coords) < 3:
             fused_results.append({
                 "label": "other_text",
-                "text_confidence": round(t_conf, 4),
-                "field_confidence": 0.0,
                 "confidence": round(t_conf, 4),
-                "overlap_ratio": 0.0,
                 "polygon": t_coords,
             })
             continue
@@ -143,25 +134,18 @@ def match_text_to_fields(
 
         if best_field is not None and best_ratio >= min_overlap_ratio:
             f_label = best_field.get("label", "text")
-            f_conf = float(best_field.get("confidence", 0.0))
             if best_idx is not None:
                 matched_field_indices.add(best_idx)
 
             fused_results.append({
                 "label": f_label,
-                "text_confidence": round(t_conf, 4),
-                "field_confidence": round(f_conf, 4),
                 "confidence": round(t_conf, 4),
-                "overlap_ratio": round(best_ratio, 4),
                 "polygon": t_coords,
             })
         else:
             fused_results.append({
                 "label": "other_text",
-                "text_confidence": round(t_conf, 4),
-                "field_confidence": 0.0,
                 "confidence": round(t_conf, 4),
-                "overlap_ratio": round(best_ratio, 4),
                 "polygon": t_coords,
             })
 
@@ -174,10 +158,7 @@ def match_text_to_fields(
                 f_coords = f_item.get("polygon", [])
                 fused_results.append({
                     "label": f_label,
-                    "text_confidence": 0.0,
-                    "field_confidence": round(f_conf, 4),
                     "confidence": round(f_conf, 4),
-                    "overlap_ratio": 0.0,
                     "polygon": f_coords,
                 })
 
