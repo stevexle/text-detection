@@ -52,20 +52,19 @@ class DBPostprocessor:
     def _get_box_score(self, prob_map: np.ndarray, poly: np.ndarray) -> float:
         """Calculate mean probability inside the polygon box."""
         h, w = prob_map.shape[:2]
-        poly = poly.copy()
-        x_min = int(np.clip(np.floor(poly[:, 0].min()), 0, w - 1))
-        x_max = int(np.clip(np.ceil(poly[:, 0].max()), 0, w - 1))
-        y_min = int(np.clip(np.floor(poly[:, 1].min()), 0, h - 1))
-        y_max = int(np.clip(np.ceil(poly[:, 1].max()), 0, h - 1))
+        x_min = max(0, int(np.floor(poly[:, 0].min())))
+        x_max = min(w - 1, int(np.ceil(poly[:, 0].max())))
+        y_min = max(0, int(np.floor(poly[:, 1].min())))
+        y_max = min(h - 1, int(np.ceil(poly[:, 1].max())))
 
         if x_max <= x_min or y_max <= y_min:
             return 0.0
 
         mask = np.zeros((y_max - y_min + 1, x_max - x_min + 1), dtype=np.uint8)
-        shifted_poly = poly.copy()
-        shifted_poly[:, 0] -= x_min
-        shifted_poly[:, 1] -= y_min
-        cv2.fillPoly(mask, [shifted_poly.astype(np.int32)], 1)
+        shifted_poly = np.empty_like(poly, dtype=np.int32)
+        shifted_poly[:, 0] = poly[:, 0] - x_min
+        shifted_poly[:, 1] = poly[:, 1] - y_min
+        cv2.fillPoly(mask, [shifted_poly], 1)
 
         cropped_prob = prob_map[y_min : y_max + 1, x_min : x_max + 1]
         score = cv2.mean(cropped_prob, mask=mask)[0]
@@ -102,7 +101,7 @@ class DBPostprocessor:
         scale_y = dest_h / src_h
 
         contours, _ = cv2.findContours(
-            (bitmap * 255).astype(np.uint8),
+            bitmap.astype(np.uint8),
             cv2.RETR_LIST,
             cv2.CHAIN_APPROX_SIMPLE,
         )

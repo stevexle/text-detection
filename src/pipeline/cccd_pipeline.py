@@ -106,14 +106,18 @@ class CCCDDetectionPipeline:
             logger.info(f"Initializing YOLO-cls from {yolo_cls_weights}...")
             self.yolo_cls = YOLOClassifier(model_path=yolo_cls_weights, device=self.device_str)
 
-        # Pre-calculated normalization constants
-        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        # Pre-calculated tensor normalization scale and bias on device for zero-copy acceleration
+        std_arr = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        mean_arr = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        scale_val = (1.0 / (255.0 * std_arr)).reshape(3, 1, 1)
+        bias_val = (-mean_arr / std_arr).reshape(3, 1, 1)
+        self.scale_tensor = torch.tensor(scale_val, device=self.device, dtype=torch.float32)
+        self.bias_tensor = torch.tensor(bias_val, device=self.device, dtype=torch.float32)
 
     def warmup(self, num_runs: int = 2):
         """Warm up GPU and JIT execution graphs to eliminate cold-start latency."""
         logger.info("Warming up pipeline models...")
-        dummy_img = np.zeros((640, 640, 3), dtype=np.uint8)
+        dummy_img = np.zeros((448, 960, 3), dtype=np.uint8)
         for _ in range(num_runs):
             _ = self.predict(dummy_img, min_conf=0.5)
         logger.info("Pipeline warmup complete.")
@@ -130,15 +134,13 @@ class CCCDDetectionPipeline:
         h, w = img_bgr.shape[:2]
         dyn_h, dyn_w = self._get_dynamic_dims(h, w)
 
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        img_resized = cv2.resize(img_rgb, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
-        norm_img = ((img_resized / 255.0) - self.mean) / self.std
+        img_resized = cv2.resize(img_bgr, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
 
-        tensor = torch.from_numpy(norm_img.transpose(2, 0, 1).astype(np.float32)).unsqueeze(0).to(self.device)
+        tensor = torch.from_numpy(img_rgb.transpose(2, 0, 1)).to(self.device, non_blocking=True).float()
+        tensor = (tensor * self.scale_tensor + self.bias_tensor).unsqueeze(0)
         if self.fp16 and self.device_str == "cuda":
             tensor = tensor.half()
-        else:
-            tensor = tensor.float()
         return tensor, (dyn_h, dyn_w)
 
     def _preprocess_batch(self, images: List[np.ndarray]) -> torch.Tensor:
@@ -149,18 +151,16 @@ class CCCDDetectionPipeline:
 
         batch_tensors = []
         for img_bgr in images:
-            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-            img_resized = cv2.resize(img_rgb, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
-            norm_img = ((img_resized / 255.0) - self.mean) / self.std
-            batch_tensors.append(norm_img.transpose(2, 0, 1))
+            img_resized = cv2.resize(img_bgr, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+            t = torch.from_numpy(img_rgb.transpose(2, 0, 1)).to(self.device, non_blocking=True).float()
+            t = t * self.scale_tensor + self.bias_tensor
+            batch_tensors.append(t)
 
-        stacked = np.stack(batch_tensors, axis=0).astype(np.float32)
-        tensor = torch.from_numpy(stacked).to(self.device)
+        stacked = torch.stack(batch_tensors, dim=0)
         if self.fp16 and self.device_str == "cuda":
-            tensor = tensor.half()
-        else:
-            tensor = tensor.float()
-        return tensor
+            stacked = stacked.half()
+        return stacked
 
     def predict(
         self,
