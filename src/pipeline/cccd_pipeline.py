@@ -39,8 +39,8 @@ class CCCDDetectionPipeline:
         dbnet_weights: str = "weights/dbnet/dbnet_cccd_best.pth",
         yolo_seg_weights: str = "weights/yolo/yolo26_seg_best.pt",
         yolo_cls_weights: Optional[str] = "weights/yolo/yolo26_cls_best.pt",
-        dbnet_box_thresh: float = 0.35,
-        dbnet_unclip_ratio: float = 1.75,
+        dbnet_box_thresh: Optional[float] = None,
+        dbnet_unclip_ratio: Optional[float] = None,
         max_side_len: int = 960,
         device: str = "",
         fp16: bool = False,
@@ -88,12 +88,18 @@ class CCCDDetectionPipeline:
 
         self.db_model.eval()
 
-        # Configurable postprocessor box threshold & unclip expansion ratio
-        post_cfg = dict(self.db_cfg.postprocess)
-        if dbnet_box_thresh is not None:
+        # Prioritize parameters defined in dbnet.yaml, fallback to defaults only if missing
+        post_cfg = dict(getattr(self.db_cfg, "postprocess", {}))
+        if "box_thresh" not in post_cfg:
+            post_cfg["box_thresh"] = dbnet_box_thresh if dbnet_box_thresh is not None else 0.6
+        elif dbnet_box_thresh is not None:
             post_cfg["box_thresh"] = dbnet_box_thresh
-        if dbnet_unclip_ratio is not None:
+
+        if "unclip_ratio" not in post_cfg:
+            post_cfg["unclip_ratio"] = dbnet_unclip_ratio if dbnet_unclip_ratio is not None else 1.75
+        elif dbnet_unclip_ratio is not None:
             post_cfg["unclip_ratio"] = dbnet_unclip_ratio
+
         self.postprocessor = build_postprocessor(post_cfg)
 
         # 3. Build YOLO Segmentation model

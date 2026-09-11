@@ -7,7 +7,7 @@ import argparse
 import os
 from pathlib import Path
 import time
-from typing import List
+from typing import List, Optional
 import cv2
 import numpy as np
 import psutil
@@ -45,7 +45,8 @@ def run_benchmark(
     batch_size: int = 8,
     fp16: bool = True,
     device: str = "",
-    unclip_ratio: float = 1.75,
+    unclip_ratio: Optional[float] = None,
+    box_thresh: Optional[float] = None,
 ):
     logger.info("=" * 65)
     logger.info("CCCD PIPELINE SERVER STRESS TEST & BENCHMARK")
@@ -74,6 +75,7 @@ def run_benchmark(
     pipeline = CCCDDetectionPipeline(
         device=device,
         fp16=fp16,
+        dbnet_box_thresh=box_thresh,
         dbnet_unclip_ratio=unclip_ratio,
     )
 
@@ -184,7 +186,8 @@ def main():
     parser.add_argument("--fp16", action="store_true", default=True, help="Enable FP16 half precision")
     parser.add_argument("--no-fp16", dest="fp16", action="store_false", help="Disable FP16")
     parser.add_argument("--device", type=str, default="", help="Device (cuda, mps, cpu)")
-    parser.add_argument("--unclip-ratio", type=float, default=1.75, help="Vatti unclip expansion ratio")
+    parser.add_argument("--unclip-ratio", type=float, default=None, help="Vatti unclip expansion ratio override (default: from dbnet.yaml)")
+    parser.add_argument("--box-thresh", type=float, default=None, help="DBNet box score threshold override (default: from dbnet.yaml)")
     args = parser.parse_args()
 
     run_benchmark(
@@ -194,6 +197,7 @@ def main():
         fp16=args.fp16,
         device=args.device,
         unclip_ratio=args.unclip_ratio,
+        box_thresh=args.box_thresh,
     )
 
 

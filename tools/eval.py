@@ -64,10 +64,15 @@ def evaluate_dbnet(
     model.eval()
 
     # 3. Postprocessor & Evaluator
-    post_cfg = dict(cfg.postprocess)
-    if box_thresh is not None:
+    post_cfg = dict(getattr(cfg, "postprocess", {}))
+    if "box_thresh" not in post_cfg:
+        post_cfg["box_thresh"] = box_thresh if box_thresh is not None else 0.6
+    elif box_thresh is not None:
         post_cfg["box_thresh"] = box_thresh
-    if unclip_ratio is not None:
+
+    if "unclip_ratio" not in post_cfg:
+        post_cfg["unclip_ratio"] = unclip_ratio if unclip_ratio is not None else 1.75
+    elif unclip_ratio is not None:
         post_cfg["unclip_ratio"] = unclip_ratio
 
     postprocessor = build_postprocessor(post_cfg)

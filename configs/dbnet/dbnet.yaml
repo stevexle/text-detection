@@ -56,8 +56,9 @@ postprocess:
   type: "DBPostProcessor"
   thresh: 0.3                  # Threshold to binarize probability map
   box_thresh: 0.6              # Minimum average score to retain a detected text polygon
-  unclip_ratio: 1.5            # Vatti clipping expansion ratio to restore full text box
+  unclip_ratio: 1.75           # Vatti clipping expansion ratio to restore full text box (matching pipeline default)
   min_size: 3                  # Minimum side length (in pixels) for a valid text box
+  max_candidates: 1000         # Maximum number of candidate text contours
   polygon_type: "quad"         # "quad" (4-point bounding box) or "polygon" (arbitrary)
 
 # ------------------------------------------------------------------------------
