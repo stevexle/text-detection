@@ -128,20 +128,37 @@ def main():
     parser = argparse.ArgumentParser(description="Train YOLO26 Field Detection / Segmentation")
     parser.add_argument("--config", type=str, default="configs/yolo/yolo_seg.yaml", help="Path to config file")
     parser.add_argument("--weights", type=str, default="", help="Initial weights")
-    parser.add_argument("--epochs", type=int, default=50, help="Total training epochs")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
-    parser.add_argument("--imgsz", type=int, default=640, help="Image resolution")
-    parser.add_argument("--device", type=str, default="", help="Device to use (mps, cuda, cpu)")
-    parser.add_argument("--save-best-to", type=str, default="", help="Path to save best weights")
+    parser.add_argument("--epochs", type=int, default=None, help="Override total training epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size")
+    parser.add_argument("--imgsz", type=int, default=None, help="Override image resolution")
+    parser.add_argument("--device", type=str, default=None, help="Device to use (mps, cuda, cpu)")
+    parser.add_argument("--save-best-to", type=str, default=None, help="Path to save best weights")
     args = parser.parse_args()
 
     task = "segment" if "seg" in str(args.config) else "detect"
 
+    # Read config file to extract hyperparameters
+    cfg_data = {}
+    if Path(args.config).exists():
+        with open(args.config, "r", encoding="utf-8") as f:
+            cfg_data = yaml.safe_load(f) or {}
+
+    val_ratio = cfg_data.get("val_ratio", 0.15)
+    split_seed = cfg_data.get("split_seed", 42)
+    epochs = args.epochs if args.epochs is not None else cfg_data.get("epochs", 50)
+    batch_size = args.batch_size if args.batch_size is not None else cfg_data.get("batch_size", 16)
+    imgsz = args.imgsz if args.imgsz is not None else cfg_data.get("imgsz", 640)
+    device = args.device if args.device is not None else cfg_data.get("device", "")
+    default_save = cfg_data.get("save_best_to") or (
+        "weights/yolo/yolo26_seg_best.pt" if task == "segment" else "weights/yolo/yolo26_det_best.pt"
+    )
+    save_dest_str = args.save_best_to if args.save_best_to is not None else default_save
+
     # 1. Create dynamic staging
     staged_data_yaml = create_dynamic_yolo_staging(
         config_path=args.config,
-        val_ratio=0.15,
-        split_seed=42,
+        val_ratio=val_ratio,
+        split_seed=split_seed,
     )
 
     # 2. Resolve weights
@@ -160,21 +177,19 @@ def main():
 
     # 3. Train
     proj_dir = "work_dirs/yolo_seg" if task == "segment" else "work_dirs/yolo_detect"
-    logger.info(f"Starting training on {staged_data_yaml} (Epochs={args.epochs}, Batch={args.batch_size}, ImgSz={args.imgsz})...")
+    logger.info(f"Starting training on {staged_data_yaml} (Epochs={epochs}, Batch={batch_size}, ImgSz={imgsz})...")
     results = model.train(
         data=str(staged_data_yaml.resolve()),
-        epochs=args.epochs,
-        batch=args.batch_size,
-        imgsz=args.imgsz,
-        device=args.device if args.device else "",
+        epochs=epochs,
+        batch=batch_size,
+        imgsz=imgsz,
+        device=device,
         project=proj_dir,
         name="exp",
         exist_ok=True,
     )
 
     # 4. Save best weights
-    default_save = "weights/yolo/yolo26_seg_best.pt" if task == "segment" else "weights/yolo/yolo26_det_best.pt"
-    save_dest_str = args.save_best_to if args.save_best_to else default_save
     save_dest = Path(save_dest_str)
     save_dest.parent.mkdir(parents=True, exist_ok=True)
 

@@ -29,3 +29,10 @@ names:
   8: issue_date
   9: features
   10: mrz
+
+# Default training hyperparameters (can be overridden via CLI)
+epochs: 50
+batch_size: 16
+imgsz: 640
+lr0: 0.001
+save_best_to: "weights/yolo/yolo26_det_best.pt"
