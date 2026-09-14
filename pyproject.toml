@@ -28,6 +28,10 @@ dependencies = [
     "tqdm>=4.66.0",
     "ultralytics>=8.2.0",
     "pi-heif>=0.14.0",
+    "onnxruntime>=1.24.3",
+    "onnxsim>=0.7.3",
+    "onnxscript>=0.7.2",
+    "onnxslim>=0.1.96",
 ]
 
 [tool.hatch.build.targets.wheel]
