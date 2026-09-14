@@ -167,6 +167,21 @@ Run the automated script to download ImageNet backbones (ResNet-50/18, MobileNet
 bash scripts/download_weights.sh
 ```
 
+### 3. 🚀 Quick Run with ONNX Runtime (Fastest 1-Click Demo)
+
+Run the complete end-to-end detection pipeline (Document Classification + 11 Field Segmentations + DBNet Text Contours + Spatial Matching) purely on **ONNX Runtime**:
+
+```bash
+# 1-Click predict and visualize with ONNX Runtime:
+uv run python tools/predict_pipeline_onnx.py \
+  --source data/quanganh-f.jpg \
+  --save-vis runs/pipeline_onnx/
+```
+
+* **Hardware Acceleration:** Auto-selects `CoreMLExecutionProvider` on Apple Silicon (159/181 nodes accelerated) or `CUDAExecutionProvider` on NVIDIA GPU.
+* **Output JSON:** Saved to `runs/pipeline_onnx/result.json`.
+* **Output Visualization:** Colored polygon badges saved to `runs/pipeline_onnx/onnx_fused_quanganh-f.jpg`.
+
 ---
 
 ## 🚀 Execution & Usage
@@ -185,9 +200,13 @@ uv run python tools/train_yolo_cls.py --config configs/yolo/yolo_cls.yaml --epoc
 uv run python tools/eval_yolo_cls.py --config configs/yolo/yolo_cls.yaml
 ```
 
-#### Run Classification Inference:
+#### Run Classification Inference (PyTorch & ONNX):
 ```bash
+# PyTorch inference:
 uv run python tools/predict_yolo_cls.py --weights weights/yolo/yolo26_cls_best.pt --source data/images/sample.jpg --save-json output.json
+
+# ONNX Runtime inference:
+uv run yolo predict model=weights/onnx/yolo26_cls.onnx source=data/quanganh-f.jpg
 ```
 
 ---
@@ -224,49 +243,20 @@ uv run python tools/train_yolo.py --config configs/yolo/yolo_seg.yaml --epochs 5
 
 #### Run Pure YOLO End-to-End Prediction:
 ```bash
+# PyTorch pipeline:
 uv run python tools/predict_yolo_pipeline.py --source data/cccd-minh2.jpg --save-vis runs/predict_yolo/
+
+# Direct ONNX Runtime YOLO-seg inference:
+uv run yolo predict model=weights/onnx/yolo26_seg.onnx source=data/quanganh-f.jpg
 ```
 
 ---
 
-### Module 4: End-to-End Hybrid Fusion Pipeline (PyTorch)
+### Module 4: 🚀 Pure ONNX Runtime High-Throughput Pipeline (Production-Ready)
 
-Combines **Document Classification + Field Segmentation + DBNet Text Contour Extraction + Spatial Matching** in PyTorch.
+Production pipeline executing entirely on **ONNX Runtime C++ Engine** without PyTorch inference overhead.
 
-```bash
-uv run python tools/predict_pipeline.py --source data/quanganh-f.jpg --save-vis runs/pipeline/
-```
-
----
-
-### Module 5: ONNX Model Export & Deployment Optimization
-
-Exports PyTorch checkpoints into self-contained, optimized `.onnx` models with dynamic spatial/batch dimensions, constant folding via `onnxslim`, embedded Netron metadata, and multi-shape ONNX Runtime validation.
-
-#### 1-Click Export All Models:
-```bash
-uv run python tools/export_onnx.py --model all
-```
-
-#### Export Individual Models:
-```bash
-uv run python tools/export_onnx.py --model dbnet
-uv run python tools/export_onnx.py --model yolo-seg
-uv run python tools/export_onnx.py --model yolo-cls
-```
-
-#### Exported Artifacts in `weights/onnx/`:
-* `dbnet.onnx`: Self-contained single file (~96 MB) with dynamic axes `{0: batch, 2: height, 3: width}`, verified on shapes `640x640`, `800x800`, `512x512`.
-* `yolo26_seg.onnx`: Instance segmentation model (~11 MB) optimized with `onnxslim`.
-* `yolo26_cls.onnx`: Classification model (~6 MB) with dynamic batching.
-
----
-
-### Module 6: 🚀 Pure ONNX Runtime High-Throughput Pipeline
-
-High-performance production pipeline executing entirely on **ONNX Runtime C++ Engine** without PyTorch inference overhead.
-
-#### Key Optimizations:
+#### Key Architectural Optimizations:
 1. **3-Way Concurrent Multi-threading:** Executes DBNet, YOLO-seg, and YOLO-cls in parallel threads (`ThreadPoolExecutor(max_workers=3)`), releasing Python GIL.
 2. **Fused Multiply-Add Normalization:** Precomputed `scale` and `bias` fuses `/255.0`, `-mean`, and `/std` into a single vectorized arithmetic operation.
 3. **Zero-Copy Memory Layout:** `np.ascontiguousarray` prevents memory re-allocations when passing image tensors to ONNX Runtime C++.
@@ -335,6 +325,39 @@ with CCCDDetectionPipelineONNX(
   "latency_ms": 189.65
 }
 ```
+
+---
+
+### Module 5: End-to-End Hybrid Fusion Pipeline (PyTorch)
+
+Combines **Document Classification + Field Segmentation + DBNet Text Contour Extraction + Spatial Matching** in PyTorch for research and debugging:
+
+```bash
+uv run python tools/predict_pipeline.py --source data/quanganh-f.jpg --save-vis runs/pipeline/
+```
+
+---
+
+### Module 6: ONNX Model Export & Deployment Optimization
+
+Exports PyTorch checkpoints into self-contained, optimized `.onnx` models with dynamic spatial/batch dimensions, constant folding via `onnxslim`, embedded Netron metadata, and multi-shape ONNX Runtime validation.
+
+#### 1-Click Export All Models:
+```bash
+uv run python tools/export_onnx.py --model all
+```
+
+#### Export Individual Models:
+```bash
+uv run python tools/export_onnx.py --model dbnet
+uv run python tools/export_onnx.py --model yolo-seg
+uv run python tools/export_onnx.py --model yolo-cls
+```
+
+#### Exported Artifacts in `weights/onnx/`:
+* `dbnet.onnx`: Self-contained single file (~96 MB) with dynamic axes `{0: batch, 2: height, 3: width}`, verified on shapes `640x640`, `800x800`, `512x512`.
+* `yolo26_seg.onnx`: Instance segmentation model (~11 MB) optimized with `onnxslim`.
+* `yolo26_cls.onnx`: Classification model (~6 MB) with dynamic batching.
 
 ---
 
