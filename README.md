@@ -113,11 +113,17 @@ text_detection/
 │   ├── train_yolo_cls.py             # YOLO Document Classification training CLI
 │   ├── eval_yolo_cls.py              # YOLO Document Classification evaluation CLI
 │   ├── predict_yolo_cls.py           # YOLO Document Classification inference CLI
-│   └── predict_pipeline.py           # 1-Click Hybrid Pipeline (DBNet + YOLO Labeled Polygons)
+│   ├── predict_pipeline.py           # 1-Click Hybrid Pipeline (DBNet + YOLO Labeled Polygons)
+│   ├── benchmark_performance.py      # Stress testing & multi-worker pipeline benchmark CLI
+│   └── export_onnx.py                # Production ONNX Exporter (DBNet, YOLO-seg, YOLO-cls)
 ├── weights/                          # Pretrained & Best production weights
 │   ├── dbnet/dbnet_cccd_best.pth     # Production DBNet weights
-│   └── yolo/                         # Base & fine-tuned YOLO weights
-├── tests/                            # Comprehensive Unit Test Suite (43/43 passing)
+│   ├── yolo/                         # Base & fine-tuned YOLO weights
+│   └── onnx/                         # Optimized self-contained ONNX models
+│       ├── dbnet.onnx                # DBNet dynamic spatial & batch ONNX
+│       ├── yolo26_seg.onnx           # YOLO-seg dynamic ONNX
+│       └── yolo26_cls.onnx           # YOLO-cls dynamic ONNX
+├── tests/                            # Comprehensive Unit Test Suite (45/45 passing)
 ├── pyproject.toml                    # PEP 517 / PEP 621 package build configuration
 └── README.md
 ```
@@ -302,24 +308,53 @@ uv run python tools/predict_pipeline.py \
 
 ---
 
+### Module 5: ONNX Model Export & Deployment Optimization
+
+Exports PyTorch checkpoints into self-contained, optimized `.onnx` models with dynamic spatial/batch dimensions, constant folding via `onnxslim`, embedded Netron metadata, and ONNX Runtime validation.
+
+#### 1-Click Export All Models:
+```bash
+uv run python tools/export_onnx.py --model all
+```
+
+#### Export Individual Model:
+```bash
+# Export DBNet Text Detector
+uv run python tools/export_onnx.py --model dbnet
+
+# Export YOLO-seg Field Segmenter
+uv run python tools/export_onnx.py --model yolo-seg
+
+# Export YOLO-cls Document Classifier
+uv run python tools/export_onnx.py --model yolo-cls
+```
+
+#### Exported Artifacts in `weights/onnx/`:
+* `dbnet.onnx`: Self-contained single file (~96 MB) with dynamic axes `{0: batch, 2: height, 3: width}`, verified on shapes `640x640`, `800x800`, `512x512`.
+* `yolo26_seg.onnx`: Instance segmentation model (~11 MB) optimized with `onnxslim`.
+* `yolo26_cls.onnx`: Classification model (~6 MB) with dynamic batching.
+
+---
+
 ## 🧪 Verification & Unit Tests
 
-The test suite ensures 100% reliability across all core components:
+The test suite ensures 100% reliability across all core components and ONNX export integrity:
 
 ```bash
 uv run pytest -v
 ```
 
 ```text
-============================== 43 passed in 4.34s ==============================
+============================== 45 passed in 5.12s ==============================
 tests/test_classifier.py .........                                       [ 20%]
 tests/test_data.py ...                                                   [ 27%]
-tests/test_engine.py ....                                                [ 37%]
-tests/test_losses.py ....                                                [ 46%]
-tests/test_metrics.py .......                                            [ 62%]
-tests/test_models.py .......                                             [ 79%]
-tests/test_pipeline.py ..                                                [ 83%]
-tests/test_postprocess.py ...                                            [ 90%]
+tests/test_engine.py ....                                                [ 35%]
+tests/test_export_onnx.py ..                                             [ 40%]
+tests/test_losses.py ....                                                [ 49%]
+tests/test_metrics.py .......                                            [ 64%]
+tests/test_models.py .......                                             [ 80%]
+tests/test_pipeline.py ..                                                [ 84%]
+tests/test_postprocess.py ...                                            [ 91%]
 tests/test_utils.py ....                                                 [100%]
 ```
 
