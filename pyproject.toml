@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     { name = "steve", email = "Ltien540@gmail.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.24.0",
     "onnx>=1.14.0",
@@ -29,7 +29,7 @@ dependencies = [
     "ultralytics>=8.2.0",
     "pi-heif>=0.14.0",
     "onnxruntime>=1.20.0; sys_platform != 'linux'",
-    "onnxruntime-gpu>=1.20.0; sys_platform == 'linux'",
+    "onnxruntime-gpu>=1.20.0,<1.25.0; sys_platform == 'linux'",
     "onnxsim>=0.7.3",
     "onnxscript>=0.7.2",
     "onnxslim>=0.1.96",
