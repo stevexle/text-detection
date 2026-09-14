@@ -170,11 +170,17 @@ class CCCDDetectionPipelineONNX:
         self.close()
 
     def warmup(self, num_runs: int = 2):
-        """Warm up ONNX Runtime graphs to eliminate first-request cold-start latency."""
-        logger.info("Warming up ONNX pipeline models...")
-        dummy_img = np.zeros((448, 960, 3), dtype=np.uint8)
-        for _ in range(num_runs):
-            _ = self.predict(dummy_img, min_conf=0.25)
+        """
+        Warm up ONNX Runtime graphs on standard CCCD aspect ratios (Landscape & Portrait)
+        to eliminate dynamic shape JIT compilation and graph allocation overhead.
+        """
+        logger.info("Warming up ONNX pipeline models (Landscape & Portrait)...")
+        # Standard CCCD aspect ratios (Landscape 608x960 and Portrait 960x704)
+        dummy_shapes = [(608, 960), (960, 704)]
+        for dyn_h, dyn_w in dummy_shapes:
+            dummy_img = np.zeros((dyn_h, dyn_w, 3), dtype=np.uint8)
+            for _ in range(num_runs):
+                _ = self.predict(dummy_img, min_conf=0.25)
         logger.info("ONNX Pipeline warmup complete.")
 
     # =========================================================================
