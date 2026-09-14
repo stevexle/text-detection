@@ -73,6 +73,13 @@ class CCCDDetectionPipelineONNX:
 
         sess_options = ort.SessionOptions()
         sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        # Optimize worker thread allocation to prevent thrashing
+        cpu_cores = os.cpu_count() or 4
+        sess_options.intra_op_num_threads = min(4, max(1, cpu_cores // 2))
+        sess_options.inter_op_num_threads = 1
+        sess_options.enable_cpu_mem_arena = True
+
         self.dbnet_session = ort.InferenceSession(str(dbnet_p), sess_options=sess_options, providers=self.providers)
         self.dbnet_input_name = self.dbnet_session.get_inputs()[0].name
         self.dbnet_output_name = self.dbnet_session.get_outputs()[0].name
@@ -114,9 +121,11 @@ class CCCDDetectionPipelineONNX:
             f"Initialized DBNet PostProcessor: box_thresh={post_cfg.get('box_thresh')}, unclip_ratio={post_cfg.get('unclip_ratio')}"
         )
 
-        # 6. Normalization constants (ImageNet standard)
+        # 6. Precomputed fast scale and bias for single-pass fused normalization (ImageNet standard)
         self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
         self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+        self.scale = (1.0 / (255.0 * self.std)).astype(np.float32)
+        self.bias = (-self.mean / self.std).astype(np.float32)
 
         # 7. Worker auto-sizing
         try:
@@ -162,20 +171,20 @@ class CCCDDetectionPipelineONNX:
         return dyn_h, dyn_w
 
     def _preprocess_single(self, img_bgr: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """Preprocess single image for DBNet ONNX."""
+        """Preprocess single image for DBNet ONNX using fused multiply-add normalization."""
         h, w = img_bgr.shape[:2]
         dyn_h, dyn_w = self._get_dynamic_dims(h, w)
 
         img_resized = cv2.resize(img_bgr, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        norm_img = (img_rgb - self.mean) / self.std
+        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB).astype(np.float32)
+        norm_img = img_rgb * self.scale + self.bias
 
-        # Transpose HWC -> CHW and add batch dim (1, 3, dyn_h, dyn_w)
-        tensor_np = np.transpose(norm_img, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+        # Transpose HWC -> CHW and add batch dim (1, 3, dyn_h, dyn_w) in contiguous memory
+        tensor_np = np.ascontiguousarray(np.transpose(norm_img, (2, 0, 1))[np.newaxis, ...])
         return tensor_np, (dyn_h, dyn_w)
 
-    def _preprocess_batch(self, images: List[np.ndarray]) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
-        """Vectorized batch preprocessing with uniform max dimensions."""
+    def _preprocess_batch(self, images: Sequence[np.ndarray]) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+        """Vectorized batch preprocessing with uniform max dimensions and fused normalization."""
         max_h = max(img.shape[0] for img in images)
         max_w = max(img.shape[1] for img in images)
         dyn_h, dyn_w = self._get_dynamic_dims(max_h, max_w)
@@ -185,11 +194,11 @@ class CCCDDetectionPipelineONNX:
         for img_bgr in images:
             orig_shapes.append(img_bgr.shape[:2])
             img_resized = cv2.resize(img_bgr, (dyn_w, dyn_h), interpolation=cv2.INTER_LINEAR)
-            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            norm_img = (img_rgb - self.mean) / self.std
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB).astype(np.float32)
+            norm_img = img_rgb * self.scale + self.bias
             batch_arrays.append(np.transpose(norm_img, (2, 0, 1)))
 
-        batch_tensor = np.stack(batch_arrays, axis=0).astype(np.float32)
+        batch_tensor = np.ascontiguousarray(np.stack(batch_arrays, axis=0))
         return batch_tensor, orig_shapes
 
     # =========================================================================
@@ -200,15 +209,21 @@ class CCCDDetectionPipelineONNX:
         if self.yolo_cls is None:
             return {"card_type": "unknown", "confidence": 0.0}
 
-        res = self.yolo_cls(img_bgr, verbose=False)[0]
+        res = self.yolo_cls(img_bgr, imgsz=224, verbose=False)[0]
         top1_idx = int(res.probs.top1)
         card_type = str(res.names[top1_idx])
         conf = float(res.probs.top1conf.item())
         return {"card_type": card_type, "confidence": round(conf, 4)}
 
     def _run_field_segmentation(self, img_bgr: np.ndarray, min_conf: float) -> List[Dict[str, Any]]:
-        """Step 2: Semantic field segmentation via YOLO-seg ONNX."""
-        res = self.yolo_seg(img_bgr, conf=min_conf, verbose=False)[0]
+        """Step 2: Semantic field segmentation via YOLO-seg ONNX with optimized NMS."""
+        res = self.yolo_seg(
+            img_bgr,
+            conf=min_conf,
+            max_det=30,
+            retina_masks=False,
+            verbose=False,
+        )[0]
         fields = []
 
         if res.masks is not None:
@@ -290,6 +305,94 @@ class CCCDDetectionPipelineONNX:
             "latency_ms": latency_ms,
         }
 
+    def _predict_chunk(
+        self,
+        chunk_images: List[np.ndarray],
+        min_conf: float = 0.25,
+        min_overlap: float = 0.20,
+    ) -> List[Dict[str, Any]]:
+        """Execute true batched inference on a chunk of images."""
+        if not chunk_images:
+            return []
+
+        def _batch_cls():
+            if self.yolo_cls is None:
+                return [{"card_type": "unknown", "confidence": 0.0}] * len(chunk_images)
+            res_list = self.yolo_cls(chunk_images, imgsz=224, verbose=False)
+            res_cls = []
+            for r in res_list:
+                top1 = int(r.probs.top1)
+                res_cls.append({
+                    "card_type": str(r.names[top1]),
+                    "confidence": round(float(r.probs.top1conf.item()), 4),
+                })
+            return res_cls
+
+        def _batch_seg():
+            res_list = self.yolo_seg(
+                chunk_images,
+                conf=min_conf,
+                max_det=30,
+                retina_masks=False,
+                verbose=False,
+            )
+            res_fields = []
+            for res in res_list:
+                fields = []
+                if res.masks is not None:
+                    for poly_pts, cls_idx, conf in zip(res.masks.xy, res.boxes.cls, res.boxes.conf):
+                        c_idx = int(cls_idx.item())
+                        label = str(res.names.get(c_idx, f"field_{c_idx}"))
+                        fields.append({
+                            "label": label,
+                            "confidence": round(float(conf.item()), 4),
+                            "polygon": poly_pts.tolist(),
+                        })
+                res_fields.append(fields)
+            return res_fields
+
+        def _batch_dbnet():
+            batch_tensor, orig_shapes = self._preprocess_batch(chunk_images)
+            prob_maps = self.dbnet_session.run(
+                [self.dbnet_output_name],
+                {self.dbnet_input_name: batch_tensor},
+            )[0]
+            boxes_batch = self.postprocessor(prob_maps, shape_list=orig_shapes)
+            if not isinstance(boxes_batch, list):
+                boxes_batch = [[]]
+            elif boxes_batch and isinstance(boxes_batch[0], dict):
+                boxes_batch = [boxes_batch]
+            return boxes_batch
+
+        if self.concurrent and self.executor is not None:
+            f_cls = self.executor.submit(_batch_cls)
+            f_seg = self.executor.submit(_batch_seg)
+            f_db = self.executor.submit(_batch_dbnet)
+
+            cls_results = f_cls.result()
+            seg_results = f_seg.result()
+            db_results = f_db.result()
+        else:
+            cls_results = _batch_cls()
+            seg_results = _batch_seg()
+            db_results = _batch_dbnet()
+
+        chunk_out = []
+        for i in range(len(chunk_images)):
+            fused = match_text_to_fields(
+                text_detections=db_results[i] if i < len(db_results) else [],
+                field_detections=seg_results[i] if i < len(seg_results) else [],
+                min_overlap_ratio=min_overlap,
+                fallback_unmatched_fields=True,
+            )
+            chunk_out.append({
+                "classification": cls_results[i] if i < len(cls_results) else {"card_type": "unknown", "confidence": 0.0},
+                "total_texts": len(fused),
+                "detections": fused,
+                "latency_ms": 0.0,
+            })
+        return chunk_out
+
     def predict_batch(
         self,
         images: Sequence[Union[str, Path, np.ndarray]],
@@ -298,13 +401,30 @@ class CCCDDetectionPipelineONNX:
         min_overlap: float = 0.20,
     ) -> List[Dict[str, Any]]:
         """
-        High-throughput batched inference over multiple images.
+        High-throughput true batched inference over multiple images.
         """
         results = []
         for i in range(0, len(images), batch_size):
-            chunk = images[i : i + batch_size]
-            for img in chunk:
-                results.append(self.predict(img, min_conf=min_conf, min_overlap=min_overlap))
+            chunk_raw = images[i : i + batch_size]
+            chunk_imgs = []
+            for item in chunk_raw:
+                if isinstance(item, (str, Path)):
+                    im = cv2.imread(str(item))
+                    if im is None:
+                        raise ValueError(f"Could not load image: {item}")
+                    chunk_imgs.append(im)
+                elif isinstance(item, np.ndarray):
+                    chunk_imgs.append(item)
+                else:
+                    raise TypeError(f"Unsupported image type: {type(item)}")
+
+            t0 = time.perf_counter()
+            chunk_res = self._predict_chunk(chunk_imgs, min_conf=min_conf, min_overlap=min_overlap)
+            chunk_elapsed = (time.perf_counter() - t0) * 1000.0
+            per_item_ms = round(chunk_elapsed / len(chunk_imgs), 2) if chunk_imgs else 0.0
+            for r in chunk_res:
+                r["latency_ms"] = per_item_ms
+            results.extend(chunk_res)
         return results
 
     # =========================================================================
