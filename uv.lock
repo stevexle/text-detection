@@ -2673,6 +2673,8 @@ dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux'" },
     { name = "onnx" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -2702,6 +2704,8 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.24.0" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'linux'", specifier = ">=12.1.3.1" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'linux'", specifier = ">=9.0.0.0" },
     { name = "onnx", specifier = ">=1.14.0" },
     { name = "onnxruntime", specifier = ">=1.24.3" },
     { name = "onnxscript", specifier = ">=0.7.2" },
