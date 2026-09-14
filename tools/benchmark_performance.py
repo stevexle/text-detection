@@ -47,6 +47,7 @@ def run_benchmark(
     device: str = "",
     unclip_ratio: Optional[float] = None,
     box_thresh: Optional[float] = None,
+    concurrent: bool = True,
 ):
     logger.info("=" * 65)
     logger.info("CCCD PIPELINE SERVER STRESS TEST & BENCHMARK")
@@ -77,6 +78,7 @@ def run_benchmark(
         fp16=fp16,
         dbnet_box_thresh=box_thresh,
         dbnet_unclip_ratio=unclip_ratio,
+        concurrent=concurrent,
     )
 
     if torch.cuda.is_available():
@@ -188,6 +190,7 @@ def main():
     parser.add_argument("--device", type=str, default="", help="Device (cuda, mps, cpu)")
     parser.add_argument("--unclip-ratio", type=float, default=None, help="Vatti unclip expansion ratio override (default: from dbnet.yaml)")
     parser.add_argument("--box-thresh", type=float, default=None, help="DBNet box score threshold override (default: from dbnet.yaml)")
+    parser.add_argument("--no-concurrent", dest="concurrent", action="store_false", default=True, help="Disable 3-step parallel execution")
     args = parser.parse_args()
 
     run_benchmark(
@@ -198,6 +201,7 @@ def main():
         device=args.device,
         unclip_ratio=args.unclip_ratio,
         box_thresh=args.box_thresh,
+        concurrent=args.concurrent,
     )
 
 

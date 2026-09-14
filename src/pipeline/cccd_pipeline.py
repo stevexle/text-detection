@@ -1,15 +1,17 @@
 """
 High-Performance End-to-End Hybrid CCCD Processing Pipeline.
 Features:
+- Concurrent Asynchronous Execution: Runs YOLO-cls, YOLO-seg, and DBNet simultaneously in parallel.
 - Dynamic Aspect-Ratio Preserving Scaling (prevents text compression and word fragmentation).
 - InferenceMode execution with zero memory tracking overhead.
 - Automatic Mixed Precision / Half Precision (FP16) support for GPU / Apple Silicon.
 - High-Throughput Batched Inference (`predict_batch`) for multi-card processing.
 - Guaranteed Zero-Lost-Field Fallback (keeps all YOLO fields even if DBNet misses faint text).
 - Pipeline JIT & GPU Warmup to eliminate first-request latency.
-- Accelerated AABB Spatial Matching.
+- Accelerated AABB Spatial Matching with single-pass Text Line Merging.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -31,6 +33,7 @@ logger = get_logger("CCCDPipeline")
 class CCCDDetectionPipeline:
     """
     High-Throughput eKYC Detection Pipeline for Vietnamese Citizen Identity Cards.
+    Executes Document Classification, Semantic Segmentation, and DBNet Text Detection in parallel.
     """
 
     def __init__(
@@ -44,6 +47,7 @@ class CCCDDetectionPipeline:
         max_side_len: int = 960,
         device: str = "",
         fp16: bool = False,
+        concurrent: bool = True,
     ):
         # 1. Device resolution
         if device:
@@ -61,6 +65,7 @@ class CCCDDetectionPipeline:
 
         self.fp16 = fp16 and (self.device_str in ["cuda", "mps"])
         self.max_side_len = max_side_len
+        self.concurrent = concurrent
 
         # 2. Build DBNet model
         logger.info(f"Initializing DBNet from {dbnet_weights} on {self.device_str} (FP16={self.fp16})...")
@@ -120,6 +125,21 @@ class CCCDDetectionPipeline:
         self.scale_tensor = torch.tensor(scale_val, device=self.device, dtype=torch.float32)
         self.bias_tensor = torch.tensor(bias_val, device=self.device, dtype=torch.float32)
 
+        # 5. Persistent ThreadPoolExecutor for high-speed concurrent execution
+        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="cccd_pipe") if self.concurrent else None
+
+    def close(self):
+        """Shutdown thread pool executor gracefully."""
+        if self.executor is not None:
+            self.executor.shutdown(wait=False)
+            self.executor = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def warmup(self, num_runs: int = 2):
         """Warm up GPU and JIT execution graphs to eliminate cold-start latency."""
         logger.info("Warming up pipeline models...")
@@ -168,6 +188,29 @@ class CCCDDetectionPipeline:
             stacked = stacked.half()
         return stacked
 
+    def _run_cls_single(self, img_bgr: np.ndarray) -> Optional[Dict[str, Any]]:
+        """Execute Document Classification on a single image."""
+        if self.yolo_cls is None:
+            return None
+        cls_res = self.yolo_cls.classify(img_bgr)
+        return cls_res if isinstance(cls_res, dict) else cls_res.to_dict()
+
+    def _run_yolo_seg_single(self, img_bgr: np.ndarray, min_conf: float) -> List[Dict[str, Any]]:
+        """Execute YOLO Field Segmentation on a single image."""
+        return self.yolo_seg.detect(
+            image=img_bgr,
+            min_conf=min_conf,
+            device=self.device_str if self.device_str != "mps" else None,
+        )
+
+    def _run_dbnet_single(self, img_bgr: np.ndarray, orig_h: int, orig_w: int) -> List[Dict[str, Any]]:
+        """Execute DBNet text detection and polygon post-processing on a single image."""
+        with torch.inference_mode():
+            tensor_img, _ = self._preprocess_single(img_bgr)
+            preds = self.db_model(tensor_img)
+            prob_map = preds["prob_map"][0]
+            return self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
+
     def predict(
         self,
         image: Union[str, Path, np.ndarray],
@@ -177,7 +220,7 @@ class CCCDDetectionPipeline:
     ) -> Dict[str, Any]:
         """
         Process single image with ultra-low latency and dynamic aspect-ratio preservation.
-        Uses concurrent asynchronous execution across YOLO-cls, YOLO-seg, and DBNet.
+        Uses concurrent asynchronous execution across YOLO-cls, YOLO-seg, and DBNet simultaneously.
         """
         start_time = time.perf_counter()
 
@@ -192,24 +235,20 @@ class CCCDDetectionPipeline:
         orig_h, orig_w = img_bgr.shape[:2]
 
         with torch.inference_mode():
-            # Step 1: Document Classification
-            card_classification = None
-            if self.yolo_cls is not None:
-                cls_res = self.yolo_cls.classify(img_bgr)
-                card_classification = cls_res if isinstance(cls_res, dict) else cls_res.to_dict()
+            if self.concurrent and self.executor is not None:
+                # Dispatch Step 1 (YOLO-cls), Step 2 (YOLO-seg), and Step 3 (DBNet) in parallel
+                f_cls = self.executor.submit(self._run_cls_single, img_bgr) if self.yolo_cls is not None else None
+                f_seg = self.executor.submit(self._run_yolo_seg_single, img_bgr, min_conf)
+                f_db = self.executor.submit(self._run_dbnet_single, img_bgr, orig_h, orig_w)
 
-            # Step 2: YOLO Field Segmentation
-            yolo_fields = self.yolo_seg.detect(
-                image=img_bgr,
-                min_conf=min_conf,
-                device=self.device_str if self.device_str != "mps" else None,
-            )
-
-            # Step 3: Aspect-Ratio Preserving DBNet Text Detection
-            tensor_img, _ = self._preprocess_single(img_bgr)
-            preds = self.db_model(tensor_img)
-            prob_map = preds["prob_map"][0]
-            dbnet_texts = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
+                card_classification = f_cls.result() if f_cls is not None else None
+                yolo_fields = f_seg.result()
+                dbnet_texts = f_db.result()
+            else:
+                # Sequential Fallback
+                card_classification = self._run_cls_single(img_bgr)
+                yolo_fields = self._run_yolo_seg_single(img_bgr, min_conf)
+                dbnet_texts = self._run_dbnet_single(img_bgr, orig_h, orig_w)
 
             # Step 4: Accelerated Spatial Fusion with Fallback
             fused_texts = match_text_to_fields(
@@ -238,6 +277,7 @@ class CCCDDetectionPipeline:
     ) -> List[Dict[str, Any]]:
         """
         High-throughput batch processing with aspect-ratio preserved dynamic scaling.
+        Executes batched classification, segmentation, and text detection concurrently.
         """
         results = []
         n_total = len(images)
@@ -265,26 +305,53 @@ class CCCDDetectionPipeline:
                 continue
 
             with torch.inference_mode():
-                # 1. Batched Document Classification
-                classifications = [None] * len(loaded_chunk)
-                if self.yolo_cls is not None:
-                    cls_results = self.yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
-                    classifications = [r if isinstance(r, dict) else r.to_dict() for r in cls_results]
+                if self.concurrent and self.executor is not None:
+                    # Parallel Batched Execution
+                    def _batch_cls():
+                        if self.yolo_cls is None:
+                            return [None] * len(loaded_chunk)
+                        cls_results = self.yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
+                        return [r if isinstance(r, dict) else r.to_dict() for r in cls_results]
 
-                # 2. Batched Dynamic DBNet Forward Pass
-                batch_tensor = self._preprocess_batch(loaded_chunk)
-                db_preds = self.db_model(batch_tensor)
-                batch_dbnet_texts = self.postprocessor(db_preds, shape_list=shapes)
+                    def _batch_db():
+                        batch_tensor = self._preprocess_batch(loaded_chunk)
+                        db_preds = self.db_model(batch_tensor)
+                        return self.postprocessor(db_preds, shape_list=shapes)
 
-                # 3. Batched YOLO Field Detection (Fully parallelized forward pass)
-                batch_yolo_fields = self.yolo_seg.detect_batch(
-                    images=loaded_chunk,
-                    min_conf=min_conf,
-                    batch_size=len(loaded_chunk),
-                    device=self.device_str if self.device_str != "mps" else None,
-                )
+                    def _batch_seg():
+                        return self.yolo_seg.detect_batch(
+                            images=loaded_chunk,
+                            min_conf=min_conf,
+                            batch_size=len(loaded_chunk),
+                            device=self.device_str if self.device_str != "mps" else None,
+                        )
 
-                # 4. Fast Spatial Fusion
+                    f_cls = self.executor.submit(_batch_cls)
+                    f_db = self.executor.submit(_batch_db)
+                    f_seg = self.executor.submit(_batch_seg)
+
+                    classifications = f_cls.result()
+                    batch_dbnet_texts = f_db.result()
+                    batch_yolo_fields = f_seg.result()
+                else:
+                    # Sequential Batched Execution
+                    classifications = [None] * len(loaded_chunk)
+                    if self.yolo_cls is not None:
+                        cls_results = self.yolo_cls.classify_batch(loaded_chunk, batch_size=len(loaded_chunk))
+                        classifications = [r if isinstance(r, dict) else r.to_dict() for r in cls_results]
+
+                    batch_tensor = self._preprocess_batch(loaded_chunk)
+                    db_preds = self.db_model(batch_tensor)
+                    batch_dbnet_texts = self.postprocessor(db_preds, shape_list=shapes)
+
+                    batch_yolo_fields = self.yolo_seg.detect_batch(
+                        images=loaded_chunk,
+                        min_conf=min_conf,
+                        batch_size=len(loaded_chunk),
+                        device=self.device_str if self.device_str != "mps" else None,
+                    )
+
+                # Fast Spatial Fusion
                 for idx, (db_texts, yolo_fields, cls_res) in enumerate(
                     zip(batch_dbnet_texts, batch_yolo_fields, classifications)
                 ):

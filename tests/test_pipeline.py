@@ -3,7 +3,10 @@ Unit tests for End-to-End Pipeline & Spatial Matching Fusion.
 """
 
 import unittest
+from pathlib import Path
+import numpy as np
 from src.pipeline.spatial_matcher import match_text_to_fields
+from src.pipeline.cccd_pipeline import CCCDDetectionPipeline
 
 
 class TestSpatialMatcher(unittest.TestCase):
@@ -65,6 +68,29 @@ class TestSpatialMatcher(unittest.TestCase):
         # Third text polygon has no overlapping field -> "other_text"
         self.assertEqual(fused[2]["label"], "other_text")
         self.assertEqual(fused[2]["confidence"], 0.75)
+
+
+class TestCCCDPipelineExecution(unittest.TestCase):
+    """Test CCCDDetectionPipeline sequential vs 3-step concurrent execution."""
+
+    def test_pipeline_concurrent_vs_sequential(self):
+        test_img_path = Path("data/thidong_F.png")
+        if not test_img_path.exists():
+            return
+
+        pipe_concurrent = CCCDDetectionPipeline(concurrent=True)
+        pipe_sequential = CCCDDetectionPipeline(concurrent=False)
+
+        res_con = pipe_concurrent.predict(str(test_img_path), min_conf=0.4)
+        res_seq = pipe_sequential.predict(str(test_img_path), min_conf=0.4)
+
+        # Ensure field counts and structure match identically
+        self.assertEqual(res_con["total_texts"], res_seq["total_texts"])
+        self.assertEqual(res_con["classification"], res_seq["classification"])
+        self.assertEqual(len(res_con["detections"]), len(res_seq["detections"]))
+
+        pipe_concurrent.close()
+        pipe_sequential.close()
 
 
 if __name__ == "__main__":

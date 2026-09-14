@@ -137,6 +137,7 @@ def predict_pipeline(
     warmup: bool = True,
     save_json: str = "runs/pipeline/result.json",
     save_vis: Optional[str] = None,
+    concurrent: bool = True,
 ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """
     Run end-to-end pipeline on input image(s) with high-speed batched execution and visualizations.
@@ -150,6 +151,7 @@ def predict_pipeline(
         dbnet_unclip_ratio=unclip_ratio,
         device=device,
         fp16=fp16,
+        concurrent=concurrent,
     )
 
     if warmup:
@@ -269,6 +271,7 @@ def main():
     parser.add_argument("--device", type=str, default="", help="Device (mps, cuda, cpu)")
     parser.add_argument("--fp16", action="store_true", help="Enable FP16 half precision")
     parser.add_argument("--no-warmup", action="store_true", help="Disable warmup")
+    parser.add_argument("--no-concurrent", dest="concurrent", action="store_false", default=True, help="Disable 3-step parallel execution")
     parser.add_argument("--save-json", type=str, default="runs/pipeline/result.json", help="Output JSON path")
     parser.add_argument("--save-vis", type=str, default=None, help="Optional output visualization directory")
     args = parser.parse_args()
@@ -289,6 +292,7 @@ def main():
         warmup=not args.no_warmup,
         save_json=args.save_json,
         save_vis=args.save_vis,
+        concurrent=args.concurrent,
     )
 
 
