@@ -278,25 +278,6 @@ uv run python tools/predict_pipeline_onnx.py \
   --save-vis runs/pipeline_onnx/
 ```
 
-#### Python Programmatic Usage:
-```python
-from src.pipeline.cccd_pipeline_onnx import CCCDDetectionPipelineONNX
-
-# Context manager ensures automatic cleanup of thread pool workers
-with CCCDDetectionPipelineONNX(
-    dbnet_onnx="weights/onnx/dbnet.onnx",
-    yolo_seg_onnx="weights/onnx/yolo26_seg.onnx",
-    yolo_cls_onnx="weights/onnx/yolo26_cls.onnx",
-    concurrent=True,
-) as pipeline:
-    pipeline.warmup(num_runs=2)
-    result = pipeline.predict("data/quanganh-f.jpg", min_conf=0.25)
-
-    print(f"Card Standard: {result['classification']['card_type']}")
-    print(f"Total Fields:  {result['total_texts']}")
-    print(f"Latency:       {result['latency_ms']} ms")
-```
-
 #### Structured Output Schema:
 ```json
 {
