@@ -1,21 +1,23 @@
 """
-Production ONNX Exporter for CCCD eKYC Pipeline.
-Exports DBNet, YOLO-seg, and YOLO-cls to optimized ONNX format with dynamic shapes,
-operator simplification (onnxsim), and onnxruntime numerical verification.
+High-Performance ONNX Exporter for CCCD eKYC Pipeline.
+Exports DBNet, YOLO-seg, and YOLO-cls into optimized, self-contained ONNX models
+featuring dynamic batch/spatial shapes, graph simplification (onnxslim/onnxsim),
+embedded metadata, and multi-shape numerical verification.
 """
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 import shutil
 import time
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+import warnings
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
 import torch.nn as nn
-import yaml
 
 from src.models.builder import build_model
 from src.utils.config import Config
@@ -43,17 +45,71 @@ class DBNetExportWrapper(nn.Module):
         return out
 
 
+def simplify_onnx_graph(onnx_path: Path) -> Path:
+    """
+    Simplify and optimize ONNX computational graph.
+    Prioritizes modern onnxslim (faster, no nanobind issues) with fallback to onnxsim.
+    """
+    simplified = False
+
+    # 1. Try onnxslim (modern industry standard)
+    try:
+        import onnxslim
+
+        logger.info("Simplifying ONNX graph using onnxslim (constant folding & operator fusion)...")
+        slimmed_model = onnxslim.slim(str(onnx_path))
+        onnx.save(slimmed_model, str(onnx_path))
+        simplified = True
+        logger.info("Graph simplification with onnxslim completed successfully.")
+    except Exception as e:
+        logger.warning(f"onnxslim simplification bypassed: {e}")
+
+    # 2. Fallback to onnxsim if onnxslim was unavailable
+    if not simplified:
+        try:
+            import onnxsim
+
+            logger.info("Falling back to onnxsim graph simplification...")
+            model_proto = onnx.load(str(onnx_path))
+            model_simp, check = onnxsim.simplify(model_proto)
+            if check:
+                onnx.save(model_simp, str(onnx_path))
+                logger.info("Graph simplification with onnxsim completed successfully.")
+        except Exception as e:
+            logger.warning(f"onnxsim fallback bypassed: {e}")
+
+    return onnx_path
+
+
+def add_onnx_metadata(
+    onnx_path: Path,
+    meta_dict: Dict[str, str],
+) -> None:
+    """
+    Embed descriptive metadata into the ONNX graph for inspectability in Netron.
+    """
+    try:
+        model = onnx.load(str(onnx_path))
+        for k, v in meta_dict.items():
+            entry = model.metadata_props.add()
+            entry.key = k
+            entry.value = str(v)
+        onnx.save(model, str(onnx_path))
+    except Exception as e:
+        logger.warning(f"Could not write metadata to {onnx_path.name}: {e}")
+
+
 def export_dbnet_onnx(
     config_path: str = "configs/dbnet/dbnet.yaml",
     weights_path: Optional[str] = "weights/dbnet/dbnet_cccd_best.pth",
     output_path: str = "weights/onnx/dbnet.onnx",
     imgsz: Tuple[int, int] = (640, 640),
-    opset: int = 17,
+    opset: int = 18,
     simplify: bool = True,
     verify: bool = True,
 ) -> Path:
     """
-    Export DBNet PyTorch model to ONNX with dynamic spatial and batch axes.
+    Export DBNet PyTorch model to a single, self-contained ONNX file with dynamic axes.
     """
     logger.info("=" * 60)
     logger.info(f"Starting DBNet ONNX Export (opset={opset})")
@@ -86,90 +142,79 @@ def export_dbnet_onnx(
     h, w = imgsz
     dummy_input = torch.randn(1, 3, h, w, dtype=torch.float32)
 
-    logger.info(f"Exporting PyTorch model to: {out_p}")
+    logger.info(f"Exporting PyTorch model to self-contained ONNX: {out_p}")
     t0 = time.perf_counter()
 
-    torch.onnx.export(
-        wrapper,
-        dummy_input,
-        str(out_p),
-        export_params=True,
-        opset_version=opset,
-        do_constant_folding=True,
-        input_names=["input"],
-        output_names=["prob_map"],
-        dynamic_axes={
-            "input": {0: "batch_size", 2: "height", 3: "width"},
-            "prob_map": {0: "batch_size", 2: "height", 3: "width"},
+    # Export using dynamo=False for single self-contained .onnx without .onnx.data
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+        torch.onnx.export(
+            wrapper,
+            dummy_input,
+            str(out_p),
+            export_params=True,
+            opset_version=opset,
+            do_constant_folding=True,
+            input_names=["input"],
+            output_names=["prob_map"],
+            dynamic_axes={
+                "input": {0: "batch_size", 2: "height", 3: "width"},
+                "prob_map": {0: "batch_size", 2: "height", 3: "width"},
+            },
+            dynamo=False,
+        )
+
+    t_export = time.perf_counter() - t0
+    logger.info(f"Base export completed in {t_export:.2f}s | Size: {out_p.stat().st_size / (1024 * 1024):.2f} MB")
+
+    # Simplify graph
+    if simplify:
+        simplify_onnx_graph(out_p)
+
+    # Embed metadata
+    add_onnx_metadata(
+        out_p,
+        {
+            "model_type": "DBNet",
+            "backbone": str(cfg.model.get("backbone", {}).get("type", "ResNet")),
+            "depth": str(cfg.model.get("backbone", {}).get("depth", 18)),
+            "task": "Scene Text Detection",
+            "input_shape": "B x 3 x H x W (dynamic)",
+            "output_shape": "B x 1 x H x W (probability map)",
+            "created_at": datetime.now().isoformat(),
         },
     )
-    t_export = time.perf_counter() - t0
-    logger.info(f"Base ONNX export completed in {t_export:.2f}s | Size: {out_p.stat().st_size / (1024 * 1024):.2f} MB")
 
-    # Simplify with onnxslim (recommended) or onnxsim
-    if simplify:
-        simplified = False
-        try:
-            import onnxslim
-
-            logger.info("Running onnxslim to fuse operators and fold constants...")
-            model_slimmed = onnxslim.slim(str(out_p))
-            onnx.save(model_slimmed, str(out_p))
-            logger.info(
-                f"ONNX graph successfully simplified via onnxslim | Optimized Size: {out_p.stat().st_size / (1024 * 1024):.2f} MB"
-            )
-            simplified = True
-        except Exception as e:
-            logger.warning(f"onnxslim not available or failed ({e}), attempting onnxsim fallback...")
-
-        if not simplified:
-            try:
-                import onnxsim
-
-                logger.info("Running onnxsim to fuse operators and fold constants...")
-                model_proto = onnx.load(str(out_p))
-                model_simplified, check = onnxsim.simplify(model_proto)
-                if check:
-                    onnx.save(model_simplified, str(out_p))
-                    logger.info(
-                        f"ONNX graph successfully simplified | Optimized Size: {out_p.stat().st_size / (1024 * 1024):.2f} MB"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to run onnxsim: {e}")
-
-    # Check ONNX graph validity
+    # Verify structural integrity
     onnx_model = onnx.load(str(out_p))
     onnx.checker.check_model(onnx_model)
     logger.info("ONNX graph structural validation passed.")
 
-    # Numerical verification with onnxruntime
+    # Numerical verification with onnxruntime across dynamic shapes
     if verify:
-        logger.info("Validating ONNX Runtime execution with dynamic shapes...")
+        logger.info("Validating ONNX Runtime execution across dynamic shapes...")
         session = ort.InferenceSession(str(out_p), providers=["CPUExecutionProvider"])
 
-        # Test Shape 1: 1x3x640x640
-        x1 = np.random.randn(1, 3, 640, 640).astype(np.float32)
-        ort_out1 = session.run(["prob_map"], {"input": x1})[0]
+        test_shapes = [
+            (1, 3, 640, 640),
+            (2, 3, 800, 800),
+            (4, 3, 512, 512),
+        ]
 
-        with torch.no_grad():
-            torch_out1 = wrapper(torch.from_numpy(x1)).numpy()
+        for b, c, th, tw in test_shapes:
+            x = np.random.randn(b, c, th, tw).astype(np.float32)
+            ort_out = session.run(["prob_map"], {"input": x})[0]
 
-        max_diff1 = np.max(np.abs(ort_out1 - torch_out1))
-        logger.info(f"Test 1 [1, 3, 640, 640] -> Output: {ort_out1.shape} | Max Diff: {max_diff1:.2e}")
-        assert max_diff1 < 1e-4, f"Numerical discrepancy too large in Test 1: {max_diff1}"
+            with torch.no_grad():
+                torch_out = wrapper(torch.from_numpy(x)).numpy()
 
-        # Test Shape 2: Dynamic Batch & Resolution 2x3x800x800
-        x2 = np.random.randn(2, 3, 800, 800).astype(np.float32)
-        ort_out2 = session.run(["prob_map"], {"input": x2})[0]
+            max_diff = float(np.max(np.abs(ort_out - torch_out)))
+            logger.info(
+                f"Shape [{b}, {c}, {th}, {tw}] -> Output: {ort_out.shape} | Max Diff: {max_diff:.2e}"
+            )
+            assert max_diff < 1e-4, f"Discrepancy too large for shape [{b},{c},{th},{tw}]: {max_diff}"
 
-        with torch.no_grad():
-            torch_out2 = wrapper(torch.from_numpy(x2)).numpy()
-
-        max_diff2 = np.max(np.abs(ort_out2 - torch_out2))
-        logger.info(f"Test 2 [2, 3, 800, 800] -> Output: {ort_out2.shape} | Max Diff: {max_diff2:.2e}")
-        assert max_diff2 < 1e-4, f"Numerical discrepancy too large in Test 2: {max_diff2}"
-
-        logger.info("Dynamic axes validation passed (tested sizes 640x640 and 800x800 across batches).")
+        logger.info("All dynamic shape verification tests passed successfully.")
 
     return out_p
 
@@ -178,8 +223,9 @@ def export_yolo_onnx(
     weights_path: str,
     output_path: str,
     imgsz: Union[int, Tuple[int, int]] = 640,
-    opset: int = 17,
+    opset: int = 18,
     simplify: bool = True,
+    verify: bool = True,
 ) -> Path:
     """
     Export Ultralytics YOLO model (cls or seg) to ONNX with dynamic shapes.
@@ -208,10 +254,35 @@ def export_yolo_onnx(
     )
 
     exp_p = Path(exported_file)
-    if exp_p != out_p:
+    if exp_p.resolve() != out_p.resolve():
         shutil.move(str(exp_p), str(out_p))
 
-    logger.info(f"YOLO ONNX exported successfully to: {out_p} | Size: {out_p.stat().st_size / (1024 * 1024):.2f} MB")
+    # Embed metadata
+    add_onnx_metadata(
+        out_p,
+        {
+            "model_type": "YOLO26",
+            "source_weights": w_p.name,
+            "created_at": datetime.now().isoformat(),
+        },
+    )
+
+    # Verification with ONNX Runtime
+    if verify:
+        logger.info(f"Validating {out_p.name} with ONNX Runtime...")
+        session = ort.InferenceSession(str(out_p), providers=["CPUExecutionProvider"])
+        in_meta = session.get_inputs()[0]
+        in_name = in_meta.name
+
+        dim_h = imgsz if isinstance(imgsz, int) else imgsz[0]
+        dim_w = imgsz if isinstance(imgsz, int) else imgsz[1]
+        dummy = np.random.randn(1, 3, dim_h, dim_w).astype(np.float32)
+
+        out = session.run(None, {in_name: dummy})
+        out_shapes = [list(o.shape) for o in out]
+        logger.info(f"Verified {out_p.name} -> Input: {in_name} | Outputs: {out_shapes}")
+
+    logger.info(f"YOLO ONNX exported successfully: {out_p} ({out_p.stat().st_size / (1024 * 1024):.2f} MB)")
     return out_p
 
 
@@ -222,7 +293,7 @@ def main():
         type=str,
         default="all",
         choices=["all", "dbnet", "yolo-seg", "yolo-cls"],
-        help="Target model to export",
+        help="Target model to export (default: all)",
     )
     parser.add_argument(
         "--output-dir",
@@ -257,13 +328,13 @@ def main():
     parser.add_argument(
         "--opset",
         type=int,
-        default=17,
-        help="ONNX opset version (default: 17)",
+        default=18,
+        help="ONNX opset version (default: 18)",
     )
     parser.add_argument(
         "--no-simplify",
         action="store_true",
-        help="Disable onnxsim graph simplification",
+        help="Disable graph simplification",
     )
     parser.add_argument(
         "--no-verify",
@@ -278,6 +349,13 @@ def main():
     verify = not args.no_verify
 
     results: Dict[str, Path] = {}
+
+    # Clean up any residual external weight sidecars
+    for sidecar in out_dir.glob("*.onnx.data"):
+        try:
+            sidecar.unlink()
+        except OSError:
+            pass
 
     if args.model in ["all", "dbnet"]:
         dbnet_out = out_dir / "dbnet.onnx"
@@ -299,11 +377,10 @@ def main():
                 imgsz=640,
                 opset=args.opset,
                 simplify=simplify,
+                verify=verify,
             )
         else:
-            logger.warning(
-                f"YOLO-seg checkpoint not found at '{args.yolo_seg_weights}'. Skipping. (You can run once weights are synced)."
-            )
+            logger.warning(f"YOLO-seg checkpoint not found at '{args.yolo_seg_weights}'. Skipping.")
 
     if args.model in ["all", "yolo-cls"]:
         yolo_cls_out = out_dir / "yolo26_cls.onnx"
@@ -314,11 +391,10 @@ def main():
                 imgsz=224,
                 opset=args.opset,
                 simplify=simplify,
+                verify=verify,
             )
         else:
-            logger.warning(
-                f"YOLO-cls checkpoint not found at '{args.yolo_cls_weights}'. Skipping. (You can run once weights are synced)."
-            )
+            logger.warning(f"YOLO-cls checkpoint not found at '{args.yolo_cls_weights}'. Skipping.")
 
     logger.info("=" * 60)
     logger.info("ONNX Export Process Finished Summary:")
