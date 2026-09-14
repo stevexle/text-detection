@@ -1,17 +1,21 @@
 """
 High-Performance End-to-End Hybrid CCCD Processing Pipeline.
 Features:
-- Concurrent Asynchronous Execution: Runs YOLO-cls, YOLO-seg, and DBNet simultaneously in parallel.
+- AsyncIO & ThreadPool Integration: High-speed non-blocking async API for FastAPI / Uvicorn servers.
+- Dynamic Hardware Auto-Sizing: Automatically detects available CPU cores (Docker / K8s friendly, capped at max=3).
+- 3-Way Concurrent Execution: Runs YOLO-cls, YOLO-seg, and DBNet simultaneously in parallel.
 - Dynamic Aspect-Ratio Preserving Scaling (prevents text compression and word fragmentation).
 - InferenceMode execution with zero memory tracking overhead.
 - Automatic Mixed Precision / Half Precision (FP16) support for GPU / Apple Silicon.
-- High-Throughput Batched Inference (`predict_batch`) for multi-card processing.
+- High-Throughput Batched Inference (`predict_batch` / `predict_batch_async`) for multi-card processing.
 - Guaranteed Zero-Lost-Field Fallback (keeps all YOLO fields even if DBNet misses faint text).
 - Pipeline JIT & GPU Warmup to eliminate first-request latency.
 - Accelerated AABB Spatial Matching with single-pass Text Line Merging.
 """
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -34,6 +38,7 @@ class CCCDDetectionPipeline:
     """
     High-Throughput eKYC Detection Pipeline for Vietnamese Citizen Identity Cards.
     Executes Document Classification, Semantic Segmentation, and DBNet Text Detection in parallel.
+    Provides both Synchronous (`predict`) and Asynchronous (`predict_async`) APIs.
     """
 
     def __init__(
@@ -48,6 +53,7 @@ class CCCDDetectionPipeline:
         device: str = "",
         fp16: bool = False,
         concurrent: bool = True,
+        max_workers: Optional[int] = None,
     ):
         # 1. Device resolution
         if device:
@@ -125,8 +131,18 @@ class CCCDDetectionPipeline:
         self.scale_tensor = torch.tensor(scale_val, device=self.device, dtype=torch.float32)
         self.bias_tensor = torch.tensor(bias_val, device=self.device, dtype=torch.float32)
 
-        # 5. Persistent ThreadPoolExecutor for high-speed concurrent execution
-        self.executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="cccd_pipe") if self.concurrent else None
+        # 5. Dynamic Worker Auto-Sizing (Detect available CPU cores, capped at max=3)
+        if max_workers is None:
+            try:
+                available_cores = len(os.sched_getaffinity(0))
+            except AttributeError:
+                available_cores = os.cpu_count() or 1
+            self.num_workers = min(3, max(1, available_cores))
+        else:
+            self.num_workers = min(3, max(1, max_workers))
+
+        logger.info(f"Initialized Pipeline with {self.num_workers} dynamic parallel workers (Concurrent={self.concurrent}).")
+        self.executor = ThreadPoolExecutor(max_workers=self.num_workers, thread_name_prefix="cccd_worker") if self.concurrent else None
 
     def close(self):
         """Shutdown thread pool executor gracefully."""
@@ -219,8 +235,7 @@ class CCCDDetectionPipeline:
         fallback_unmatched: bool = True,
     ) -> Dict[str, Any]:
         """
-        Process single image with ultra-low latency and dynamic aspect-ratio preservation.
-        Uses concurrent asynchronous execution across YOLO-cls, YOLO-seg, and DBNet simultaneously.
+        Synchronous prediction method with multi-threaded parallel execution.
         """
         start_time = time.perf_counter()
 
@@ -257,6 +272,60 @@ class CCCDDetectionPipeline:
                 min_overlap_ratio=min_overlap,
                 fallback_unmatched_fields=fallback_unmatched,
             )
+
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+
+        return {
+            "classification": card_classification,
+            "total_texts": len(fused_texts),
+            "detections": fused_texts,
+            "latency_ms": round(elapsed_ms, 2),
+        }
+
+    async def predict_async(
+        self,
+        image: Union[str, Path, np.ndarray],
+        min_conf: float = 0.4,
+        min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Asynchronous Prediction API for FastAPI, Tornado, and AsyncIO web servers.
+        Non-blocking execution using AsyncIO event loop and ThreadPoolExecutor.
+        """
+        start_time = time.perf_counter()
+        loop = asyncio.get_running_loop()
+
+        # 1. Non-blocking image loading if file path
+        if isinstance(image, (str, Path)):
+            img_path = str(image)
+            img_bgr = await loop.run_in_executor(self.executor, cv2.imread, img_path)
+            if img_bgr is None:
+                raise ValueError(f"Could not load image from: {image}")
+        else:
+            img_bgr = image
+
+        orig_h, orig_w = img_bgr.shape[:2]
+
+        # 2. Dispatch all 3 independent models to ThreadPoolExecutor via AsyncIO
+        task_cls = loop.run_in_executor(self.executor, self._run_cls_single, img_bgr) if self.yolo_cls is not None else None
+        task_seg = loop.run_in_executor(self.executor, self._run_yolo_seg_single, img_bgr, min_conf)
+        task_db = loop.run_in_executor(self.executor, self._run_dbnet_single, img_bgr, orig_h, orig_w)
+
+        # 3. Non-blocking await for all 3 tasks simultaneously
+        if task_cls is not None:
+            card_classification, yolo_fields, dbnet_texts = await asyncio.gather(task_cls, task_seg, task_db)
+        else:
+            card_classification = None
+            yolo_fields, dbnet_texts = await asyncio.gather(task_seg, task_db)
+
+        # 4. Accelerated Spatial Fusion
+        fused_texts = match_text_to_fields(
+            text_detections=dbnet_texts,
+            field_detections=yolo_fields,
+            min_overlap_ratio=min_overlap,
+            fallback_unmatched_fields=fallback_unmatched,
+        )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -369,3 +438,25 @@ class CCCDDetectionPipeline:
                     })
 
         return results
+
+    async def predict_batch_async(
+        self,
+        images: Sequence[Union[str, Path, np.ndarray]],
+        batch_size: int = 8,
+        min_conf: float = 0.4,
+        min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Asynchronous Batch Prediction API for handling multi-image concurrent requests.
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self.executor,
+            self.predict_batch,
+            images,
+            batch_size,
+            min_conf,
+            min_overlap,
+            fallback_unmatched,
+        )

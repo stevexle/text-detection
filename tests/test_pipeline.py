@@ -2,8 +2,9 @@
 Unit tests for End-to-End Pipeline & Spatial Matching Fusion.
 """
 
-import unittest
+import asyncio
 from pathlib import Path
+import unittest
 import numpy as np
 from src.pipeline.spatial_matcher import match_text_to_fields
 from src.pipeline.cccd_pipeline import CCCDDetectionPipeline
@@ -71,7 +72,7 @@ class TestSpatialMatcher(unittest.TestCase):
 
 
 class TestCCCDPipelineExecution(unittest.TestCase):
-    """Test CCCDDetectionPipeline sequential vs 3-step concurrent execution."""
+    """Test CCCDDetectionPipeline synchronous vs async vs sequential execution."""
 
     def test_pipeline_concurrent_vs_sequential(self):
         test_img_path = Path("data/thidong_F.png")
@@ -91,6 +92,24 @@ class TestCCCDPipelineExecution(unittest.TestCase):
 
         pipe_concurrent.close()
         pipe_sequential.close()
+
+    def test_pipeline_async_predict(self):
+        test_img_path = Path("data/thidong_F.png")
+        if not test_img_path.exists():
+            return
+
+        async def _run_async_test():
+            pipe = CCCDDetectionPipeline(concurrent=True)
+            res_async = await pipe.predict_async(str(test_img_path), min_conf=0.4)
+            pipe.close()
+            return res_async
+
+        res_async = asyncio.run(_run_async_test())
+        self.assertIsNotNone(res_async)
+        self.assertIn("detections", res_async)
+        self.assertIn("classification", res_async)
+        self.assertIn("latency_ms", res_async)
+        self.assertGreater(res_async["total_texts"], 0)
 
 
 if __name__ == "__main__":
