@@ -437,11 +437,11 @@ class CCCDDetectionPipelineTRT:
     # =========================================================================
     def _run_yolo_cls(self, image: np.ndarray) -> Dict[str, Any]:
         """
-        Execute document classification with imgsz=224 and half precision.
+        Execute document classification with imgsz=224.
         """
         if self.yolo_cls is None:
             return {"card_type": "unknown", "confidence": 0.0}
-        results = self.yolo_cls(image, imgsz=224, half=True, verbose=False)
+        results = self.yolo_cls(image, imgsz=224, verbose=False)
         top1_idx = results[0].probs.top1
         card_type = results[0].names[top1_idx]
         conf = float(results[0].probs.top1conf.cpu().item())
@@ -456,7 +456,6 @@ class CCCDDetectionPipelineTRT:
             image,
             conf=min_conf,
             imgsz=640,
-            half=True,
             max_det=30,
             retina_masks=False,
             verbose=False,
