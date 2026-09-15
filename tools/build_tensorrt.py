@@ -302,26 +302,23 @@ def build_yolo_engine(
     pt_file = Path(pt_path)
     if use_ultralytics_export and pt_file.exists():
         logger.info(f"Building YOLO-{model_type} via Ultralytics native TensorRT exporter: {pt_file.name}")
-        cmd = [
-            sys.executable,
-            "-m",
-            "ultralytics",
-            "export",
-            f"model={pt_file}",
-            "format=engine",
-            f"half={fp16}",
-            "dynamic=True",
-            f"workspace={workspace_mb // 1024}",
-        ]
-        logger.info(f"Command: {' '.join(cmd)}")
         if not dry_run:
-            subprocess.run(cmd, check=True)
-            exported_engine = pt_file.with_suffix(".engine")
-            if exported_engine.exists():
-                shutil.copy(exported_engine, engine_p)
+            from ultralytics import YOLO
+            model = YOLO(str(pt_file))
+            exported = model.export(
+                format="engine",
+                half=fp16,
+                dynamic=True,
+                workspace=max(1, workspace_mb // 1024),
+            )
+            exported_p = Path(exported) if exported else pt_file.with_suffix(".engine")
+            if exported_p.exists():
+                shutil.copy(exported_p, engine_p)
                 logger.info(f"Successfully generated YOLO-{model_type} engine at: {engine_p}")
+            else:
+                raise RuntimeError(f"Ultralytics export finished but {exported_p} was not found.")
         else:
-            logger.info("[Dry Run] Skipped actual engine build execution.")
+            logger.info(f"[Dry Run] Ultralytics export model={pt_file} format=engine half={fp16} dynamic=True")
         return engine_p
 
     # Fallback to ONNX conversion
