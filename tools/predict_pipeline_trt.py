@@ -322,13 +322,19 @@ def main():
             if r == repeat_count - 1:
                 all_results.append(rec)
 
-            card_type = res["classification"].get("card_type", "Unknown")
-            total_texts = res["total_texts"]
-            rep_label = f" (Run {r+1}/{repeat_count})" if repeat_count > 1 else ""
-            logger.info(
-                f"[{idx:>3}/{len(loaded_images):<3}]{rep_label} {img_path.name:<22} | "
-                f"Type: {card_type:<14} | Texts: {total_texts:<2} | Latency: {lat:5.1f}ms"
+            # Throttle logging when repeat_count is large to avoid terminal stdout bottleneck
+            should_log = (
+                repeat_count <= 20
+                or (r + 1) == 1
+                or (r + 1) == repeat_count
+                or (r + 1) % max(1, repeat_count // 10) == 0
             )
+            if should_log:
+                rep_label = f" (Run {r+1}/{repeat_count})" if repeat_count > 1 else ""
+                logger.info(
+                    f"[{idx:>3}/{len(loaded_images):<3}]{rep_label} {img_path.name:<22} | "
+                    f"Type: {card_type:<14} | Texts: {total_texts:<2} | Latency: {lat:5.1f}ms"
+                )
 
             if args.save_vis and r == repeat_count - 1:
                 vis_img = draw_labeled_polygons(
