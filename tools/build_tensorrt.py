@@ -167,10 +167,12 @@ def build_engine_from_onnx_python(
         logger.error(f"tensorrt Python package is required: {e}")
         return False
 
-    trt_logger = trt.Logger(trt.Logger.INFO)
-    builder = trt.Builder(trt_logger)
-    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    network = builder.create_network(flag)
+    # TensorRT 8 requires EXPLICIT_BATCH, while TensorRT 10+ uses explicit batch by default
+    if hasattr(trt, "NetworkDefinitionCreationFlag") and hasattr(trt.NetworkDefinitionCreationFlag, "EXPLICIT_BATCH"):
+        flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+        network = builder.create_network(flag)
+    else:
+        network = builder.create_network()
     parser = trt.OnnxParser(network, trt_logger)
 
     logger.info(f"Parsing ONNX model: {onnx_path}")
