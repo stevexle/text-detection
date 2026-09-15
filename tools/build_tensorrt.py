@@ -186,12 +186,13 @@ def build_engine_from_onnx_python(
             return False
 
     config = builder.create_builder_config()
-    if hasattr(config, "set_memory_pool_limit"):
+    if hasattr(config, "set_memory_pool_limit") and hasattr(trt, "MemoryPoolType") and hasattr(trt.MemoryPoolType, "WORKSPACE"):
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_mb * 1024 * 1024)
-    else:
+    elif hasattr(config, "max_workspace_size"):
         config.max_workspace_size = workspace_mb * 1024 * 1024
 
-    if fp16:
+    # TensorRT 8/10 supports BuilderFlag.FP16, while TensorRT 11 uses strongly typed graph definitions
+    if fp16 and hasattr(trt, "BuilderFlag") and hasattr(trt.BuilderFlag, "FP16"):
         config.set_flag(trt.BuilderFlag.FP16)
 
     # Configure dynamic shape profile
