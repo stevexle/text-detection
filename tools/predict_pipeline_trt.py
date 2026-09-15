@@ -198,6 +198,7 @@ def parse_args():
     parser.add_argument("--box-thresh", type=float, default=None, help="DBNet box score threshold.")
     parser.add_argument("--unclip-ratio", type=float, default=None, help="DBNet polygon unclip expansion ratio.")
     parser.add_argument("--max-side-len", type=int, default=960, help="DBNet maximum resize side length.")
+    parser.add_argument("--repeat", type=int, default=1, help="Number of benchmark iterations per image to measure stable steady-state latency.")
     parser.add_argument("--sequential", action="store_true", help="Run models sequentially instead of in parallel.")
     return parser.parse_args()
 
@@ -223,7 +224,8 @@ def print_benchmark_table(image_count: int, latencies: List[float]) -> Dict[str,
     print("+" + "-" * 32 + "+" + "-" * 35 + "+")
     print(f"| {'Metric':<30} | {'Value':<33} |")
     print("+" + "-" * 32 + "+" + "-" * 35 + "+")
-    print(f"| {'Processed Documents':<30} | {image_count:<33} |")
+    print(f"| {'Benchmark Inferences':<30} | {len(latencies):<33} |")
+    print(f"| {'Unique Documents':<30} | {image_count:<33} |")
     print(f"| {'Mean Latency':<30} | {mean_lat:6.2f} ms                       |")
     print(f"| {'Median Latency (P50)':<30} | {median_lat:6.2f} ms                       |")
     print(f"| {'P90 Latency':<30} | {p90_lat:6.2f} ms                       |")
@@ -235,7 +237,8 @@ def print_benchmark_table(image_count: int, latencies: List[float]) -> Dict[str,
     print("+" + "-" * 68 + "+\n")
 
     return {
-        "total_images": image_count,
+        "total_inferences": len(latencies),
+        "unique_documents": image_count,
         "mean_latency_ms": round(mean_lat, 2),
         "median_latency_ms": round(median_lat, 2),
         "p90_latency_ms": round(p90_lat, 2),
@@ -284,39 +287,51 @@ def main():
     if args.save_vis:
         Path(args.save_vis).mkdir(parents=True, exist_ok=True)
 
+    # Pre-load images to isolate pure inference latency from disk I/O
+    loaded_images: List[Tuple[Path, np.ndarray]] = []
+    for img_p in image_paths:
+        raw_bgr = cv2.imread(str(img_p))
+        if raw_bgr is not None:
+            loaded_images.append((img_p, raw_bgr))
+
     latencies: List[float] = []
     all_results: List[Dict[str, Any]] = []
 
-    logger.info("Executing TensorRT inference...")
-    for idx, img_path in enumerate(image_paths, 1):
-        res = pipeline.predict(img_path, min_conf=args.min_conf)
-        lat = res["latency_ms"]
-        latencies.append(lat)
+    repeat_count = max(1, args.repeat)
+    logger.info(f"Executing TensorRT inference (repeat={repeat_count}x)...")
 
-        rec = {
-            "image": img_path.name,
-            "path": str(img_path),
-            **res,
-        }
-        all_results.append(rec)
+    for r in range(repeat_count):
+        for idx, (img_path, raw_bgr) in enumerate(loaded_images, 1):
+            res = pipeline.predict(raw_bgr, min_conf=args.min_conf)
+            lat = res["latency_ms"]
+            latencies.append(lat)
 
-        card_type = res["classification"].get("card_type", "Unknown")
-        total_texts = res["total_texts"]
-        logger.info(
-            f"[{idx:>3}/{len(image_paths):<3}] {img_path.name:<25} | "
-            f"Type: {card_type:<16} | Texts: {total_texts:<2} | Latency: {lat:5.1f}ms"
-        )
+            rec = {
+                "image": img_path.name,
+                "path": str(img_path),
+                "iteration": r + 1,
+                **res,
+            }
+            if r == repeat_count - 1:
+                all_results.append(rec)
 
-        if args.save_vis:
-            raw_bgr = cv2.imread(str(img_path))
-            vis_img = draw_labeled_polygons(
-                raw_bgr,
-                res["detections"],
-                title=img_path.name,
-                card_type=card_type,
+            card_type = res["classification"].get("card_type", "Unknown")
+            total_texts = res["total_texts"]
+            rep_label = f" (Run {r+1}/{repeat_count})" if repeat_count > 1 else ""
+            logger.info(
+                f"[{idx:>3}/{len(loaded_images):<3}]{rep_label} {img_path.name:<22} | "
+                f"Type: {card_type:<14} | Texts: {total_texts:<2} | Latency: {lat:5.1f}ms"
             )
-            out_vis_path = Path(args.save_vis) / f"trt_{img_path.stem}.jpg"
-            cv2.imwrite(str(out_vis_path), vis_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+            if args.save_vis and r == repeat_count - 1:
+                vis_img = draw_labeled_polygons(
+                    raw_bgr,
+                    res["detections"],
+                    title=img_path.name,
+                    card_type=card_type,
+                )
+                out_vis_path = Path(args.save_vis) / f"trt_{img_path.stem}.jpg"
+                cv2.imwrite(str(out_vis_path), vis_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
     pipeline.close()
 
