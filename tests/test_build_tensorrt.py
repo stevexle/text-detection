@@ -98,6 +98,22 @@ class TestTensorRTBuilder:
         res = subprocess.run(cmd, capture_output=True, text=True)
         assert res.returncode == 0
         assert "[Dry Run]" in res.stdout
+        assert "TensorRT" in res.stdout
+
+    def test_cli_dry_run_with_trtexec_flag(self):
+        """Test build_tensorrt.py dry-run execution with explicit trtexec flag."""
+        cmd = [
+            sys.executable,
+            "tools/build_tensorrt.py",
+            "--model",
+            "dbnet",
+            "--trtexec-path",
+            "/usr/bin/trtexec",
+            "--dry-run",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        assert res.returncode == 0
+        assert "[Dry Run]" in res.stdout
         assert "trtexec" in res.stdout
 
 

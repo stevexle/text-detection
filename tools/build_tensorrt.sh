@@ -25,101 +25,19 @@ else
     exit 1
 fi
 
-# 2. Locate trtexec binary
-TRTEXEC_BIN=""
-if command -v trtexec &> /dev/null; then
-    TRTEXEC_BIN="trtexec"
-elif [ -f ".venv/bin/trtexec" ]; then
-    TRTEXEC_BIN=".venv/bin/trtexec"
-elif [ -f "/usr/src/tensorrt/bin/trtexec" ]; then
-    TRTEXEC_BIN="/usr/src/tensorrt/bin/trtexec"
-elif [ -f "/usr/local/tensorrt/bin/trtexec" ]; then
-    TRTEXEC_BIN="/usr/local/tensorrt/bin/trtexec"
-elif [ -f "/usr/bin/trtexec" ]; then
-    TRTEXEC_BIN="/usr/bin/trtexec"
+# 2. Verify TensorRT Python package in virtual environment
+if ! uv run python -c "import tensorrt; print('TensorRT Version:', tensorrt.__version__)" &> /dev/null; then
+    echo -e "${YELLOW}[INFO] TensorRT not found in active venv. Synchronizing dependencies...${NC}"
+    uv sync
 fi
 
-if [ -z "$TRTEXEC_BIN" ]; then
-    echo -e "${YELLOW}[WARNING] 'trtexec' binary not found on standard paths.${NC}"
-    echo -e "${YELLOW}Attempting to install TensorRT CUDA 12 packages into .venv...${NC}"
-    uv pip install tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs
-    if [ -f ".venv/bin/trtexec" ]; then
-        TRTEXEC_BIN=".venv/bin/trtexec"
-        echo -e "${GREEN}[OK] Installed and located: $TRTEXEC_BIN${NC}"
-    else
-        echo -e "${RED}[ERROR] Could not locate or install trtexec. Please install TensorRT first.${NC}"
-        exit 1
-    fi
-else
-    echo -e "${GREEN}[OK] Located trtexec at: $TRTEXEC_BIN${NC}"
-fi
-
-# Create target output directory
+# 3. Create target output directories
 mkdir -p weights/tensorrt
 mkdir -p weights/onnx
 
-# 3. Build DBNet TensorRT Engine
-echo -e "\n${BLUE}--- [1/3] Compiling DBNet FP16 TensorRT Engine ---${NC}"
-if [ ! -f "weights/onnx/dbnet.onnx" ]; then
-    echo -e "${YELLOW}weights/onnx/dbnet.onnx not found. Exporting now...${NC}"
-    uv run python tools/export_onnx.py --model dbnet
-fi
-
-$TRTEXEC_BIN \
-    --onnx=weights/onnx/dbnet.onnx \
-    --saveEngine=weights/tensorrt/dbnet.engine \
-    --minShapes=input:1x3x480x480 \
-    --optShapes=input:1x3x960x704 \
-    --maxShapes=input:8x3x960x960 \
-    --memPoolSize=workspace:2048M \
-    --fp16
-
-echo -e "${GREEN}[OK] DBNet engine compiled: weights/tensorrt/dbnet.engine${NC}"
-
-# 4. Build YOLO-seg TensorRT Engine
-echo -e "\n${BLUE}--- [2/3] Compiling YOLO-seg FP16 TensorRT Engine ---${NC}"
-if [ -f "weights/yolo/yolo26_seg_best.pt" ]; then
-    echo -e "${GREEN}Exporting YOLO-seg via Ultralytics native TensorRT engine export...${NC}"
-    uv run yolo export model=weights/yolo/yolo26_seg_best.pt format=engine half=True dynamic=True workspace=2
-    # Copy exported engine to standard directory
-    if [ -f "weights/yolo/yolo26_seg_best.engine" ]; then
-        cp weights/yolo/yolo26_seg_best.engine weights/tensorrt/yolo26_seg.engine
-    fi
-elif [ -f "weights/onnx/yolo26_seg.onnx" ]; then
-    $TRTEXEC_BIN \
-        --onnx=weights/onnx/yolo26_seg.onnx \
-        --saveEngine=weights/tensorrt/yolo26_seg.engine \
-        --minShapes=images:1x3x640x640 \
-        --optShapes=images:1x3x640x640 \
-        --maxShapes=images:8x3x640x640 \
-        --memPoolSize=workspace:2048M \
-        --fp16
-else
-    echo -e "${YELLOW}YOLO-seg weights not found. Skipping.${NC}"
-fi
-echo -e "${GREEN}[OK] YOLO-seg engine compiled: weights/tensorrt/yolo26_seg.engine${NC}"
-
-# 5. Build YOLO-cls TensorRT Engine
-echo -e "\n${BLUE}--- [3/3] Compiling YOLO-cls FP16 TensorRT Engine ---${NC}"
-if [ -f "weights/yolo/yolo26_cls_best.pt" ]; then
-    echo -e "${GREEN}Exporting YOLO-cls via Ultralytics native TensorRT engine export...${NC}"
-    uv run yolo export model=weights/yolo/yolo26_cls_best.pt format=engine half=True dynamic=True workspace=2
-    if [ -f "weights/yolo/yolo26_cls_best.engine" ]; then
-        cp weights/yolo/yolo26_cls_best.engine weights/tensorrt/yolo26_cls.engine
-    fi
-elif [ -f "weights/onnx/yolo26_cls.onnx" ]; then
-    $TRTEXEC_BIN \
-        --onnx=weights/onnx/yolo26_cls.onnx \
-        --saveEngine=weights/tensorrt/yolo26_cls.engine \
-        --minShapes=images:1x3x224x224 \
-        --optShapes=images:1x3x224x224 \
-        --maxShapes=images:8x3x224x224 \
-        --memPoolSize=workspace:2048M \
-        --fp16
-else
-    echo -e "${YELLOW}YOLO-cls weights not found. Skipping.${NC}"
-fi
-echo -e "${GREEN}[OK] YOLO-cls engine compiled: weights/tensorrt/yolo26_cls.engine${NC}"
+# 4. Execute Unified Python TensorRT Builder
+echo -e "\n${BLUE}--- Compiling DBNet, YOLO-seg, and YOLO-cls FP16 TensorRT Engines ---${NC}"
+uv run python tools/build_tensorrt.py --model all --fp16
 
 echo -e "\n${BLUE}======================================================================${NC}"
 echo -e "${GREEN}  All TensorRT Engines successfully compiled!                        ${NC}"

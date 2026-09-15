@@ -2,6 +2,10 @@
 Automated NVIDIA TensorRT Engine Builder for CCCD Detection Pipeline.
 Compiles DBNet, YOLO-seg, and YOLO-cls ONNX models into high-performance
 FP16 TensorRT execution engines (.engine) with dynamic shape profiles.
+
+Supports both:
+  1. Python native TensorRT Builder (via `tensorrt` package - no trtexec binary required).
+  2. Standalone `trtexec` CLI compiler if available on system PATH.
 """
 
 import argparse
@@ -11,6 +15,39 @@ import shutil
 import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
+
+# Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
+if sys.platform == "linux":
+    import ctypes
+    import site
+    try:
+        for site_pkg in site.getsitepackages():
+            nvidia_dir = os.path.join(site_pkg, "nvidia")
+            if os.path.isdir(nvidia_dir):
+                for sub in ["cuda_runtime", "cublas", "cudnn", "cufft", "curand", "tensorrt"]:
+                    lib_dir = os.path.join(nvidia_dir, sub, "lib")
+                    if os.path.isdir(lib_dir):
+                        if "LD_LIBRARY_PATH" in os.environ:
+                            if lib_dir not in os.environ["LD_LIBRARY_PATH"]:
+                                os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{os.environ['LD_LIBRARY_PATH']}"
+                        else:
+                            os.environ["LD_LIBRARY_PATH"] = lib_dir
+                        for f in sorted(os.listdir(lib_dir)):
+                            if f.endswith(".so") or ".so." in f:
+                                try:
+                                    ctypes.CDLL(os.path.join(lib_dir, f), mode=ctypes.RTLD_GLOBAL)
+                                except Exception:
+                                    pass
+            trt_dir = os.path.join(site_pkg, "tensorrt")
+            if os.path.isdir(trt_dir):
+                for f in sorted(os.listdir(trt_dir)):
+                    if f.endswith(".so") or ".so." in f:
+                        try:
+                            ctypes.CDLL(os.path.join(trt_dir, f), mode=ctypes.RTLD_GLOBAL)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
 
 from src.utils.logger import get_logger
 
@@ -39,21 +76,23 @@ SHAPE_PROFILES: Dict[str, Dict[str, str]] = {
 }
 
 
+def parse_shape_str(s: str) -> Tuple[int, ...]:
+    """Parse '1x3x480x480' string into tuple of ints (1, 3, 480, 480)."""
+    return tuple(int(x) for x in s.split("x"))
+
+
 def find_trtexec() -> Optional[str]:
     """
     Auto-detect trtexec compiler binary across virtualenv, PATH, and standard system paths.
     """
-    # 1. Check system PATH
     found = shutil.which("trtexec")
     if found:
         return found
 
-    # 2. Check current Python virtualenv bin directory
     venv_bin = Path(sys.prefix) / "bin" / "trtexec"
     if venv_bin.exists() and os.access(venv_bin, os.X_OK):
         return str(venv_bin)
 
-    # 3. Standard Linux / Docker / CUDA installation paths
     candidate_paths = [
         "/usr/src/tensorrt/bin/trtexec",
         "/usr/local/tensorrt/bin/trtexec",
@@ -80,9 +119,7 @@ def construct_trtexec_cmd(
     workspace_mb: int = 2048,
     extra_args: Optional[List[str]] = None,
 ) -> List[str]:
-    """
-    Construct the full trtexec command with dynamic shape profile arguments.
-    """
+    """Construct the full trtexec command with dynamic shape profile arguments."""
     cmd = [
         trtexec_bin,
         f"--onnx={onnx_path}",
@@ -104,8 +141,84 @@ def construct_trtexec_cmd(
     return cmd
 
 
+def build_engine_from_onnx_python(
+    onnx_path: str,
+    engine_path: str,
+    input_name: str,
+    min_shape: str,
+    opt_shape: str,
+    max_shape: str,
+    fp16: bool = True,
+    workspace_mb: int = 2048,
+    dry_run: bool = False,
+) -> bool:
+    """
+    Compile ONNX model to TensorRT engine natively via Python TensorRT API.
+    Does not require trtexec CLI binary!
+    """
+    if dry_run:
+        logger.info(f"[Dry Run] Compiling {onnx_path} -> {engine_path} via TensorRT Python API")
+        logger.info(f"[Dry Run] Shapes: min={min_shape}, opt={opt_shape}, max={max_shape}, fp16={fp16}")
+        return True
+
+    try:
+        import tensorrt as trt
+    except ImportError as e:
+        logger.error(f"tensorrt Python package is required: {e}")
+        return False
+
+    trt_logger = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(trt_logger)
+    flag = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(flag)
+    parser = trt.OnnxParser(network, trt_logger)
+
+    logger.info(f"Parsing ONNX model: {onnx_path}")
+    with open(onnx_path, "rb") as f:
+        if not parser.parse(f.read()):
+            for error in range(parser.num_errors):
+                logger.error(f"ONNX parse error: {parser.get_error(error)}")
+            return False
+
+    config = builder.create_builder_config()
+    if hasattr(config, "set_memory_pool_limit"):
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_mb * 1024 * 1024)
+    else:
+        config.max_workspace_size = workspace_mb * 1024 * 1024
+
+    if fp16:
+        config.set_flag(trt.BuilderFlag.FP16)
+
+    # Configure dynamic shape profile
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        input_name,
+        parse_shape_str(min_shape),
+        parse_shape_str(opt_shape),
+        parse_shape_str(max_shape),
+    )
+    config.add_optimization_profile(profile)
+
+    logger.info(f"Building serialized TensorRT engine: {engine_path} (this may take 1-3 minutes)...")
+    if hasattr(builder, "build_serialized_network"):
+        plan = builder.build_serialized_network(network, config)
+        if plan is None:
+            raise RuntimeError(f"TensorRT failed to build serialized network for {onnx_path}")
+        with open(engine_path, "wb") as f:
+            f.write(plan)
+    else:
+        engine = builder.build_engine(network, config)
+        if engine is None:
+            raise RuntimeError(f"TensorRT failed to build engine for {onnx_path}")
+        with open(engine_path, "wb") as f:
+            f.write(engine.serialize())
+
+    logger.info(f"Successfully compiled engine via Python API: {engine_path}")
+    return True
+
+
 def build_dbnet_engine(
-    trtexec_bin: str,
+    trtexec_bin: Optional[str] = None,
     onnx_path: str = "weights/onnx/dbnet.onnx",
     output_dir: str = "weights/tensorrt",
     fp16: bool = True,
@@ -115,107 +228,133 @@ def build_dbnet_engine(
     """Build DBNet TensorRT Engine with dynamic spatial and batch profiles."""
     onnx_p = Path(onnx_path)
     if not onnx_p.exists():
-        raise FileNotFoundError(f"DBNet ONNX model not found at: {onnx_p}")
+        logger.info(f"DBNet ONNX model not found at {onnx_p}. Exporting now...")
+        if not dry_run:
+            from tools.export_onnx import export_dbnet_onnx
+            export_dbnet_onnx()
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     engine_p = out_dir / "dbnet.engine"
 
     prof = SHAPE_PROFILES["dbnet"]
-    cmd = construct_trtexec_cmd(
-        trtexec_bin=trtexec_bin,
-        onnx_path=str(onnx_p),
-        engine_path=str(engine_p),
-        input_name=prof["input_name"],
-        min_shape=prof["min"],
-        opt_shape=prof["opt"],
-        max_shape=prof["max"],
-        fp16=fp16,
-        workspace_mb=workspace_mb,
-    )
 
-    logger.info(f"Building DBNet TensorRT engine: {engine_p.name}...")
-    logger.info(f"Command: {' '.join(cmd)}")
-
-    if not dry_run:
-        res = subprocess.run(cmd, check=True)
-        if res.returncode == 0:
-            logger.info(f"Successfully generated DBNet TensorRT engine at: {engine_p}")
+    # Option A: If trtexec binary is available, construct command
+    if trtexec_bin:
+        cmd = construct_trtexec_cmd(
+            trtexec_bin=trtexec_bin,
+            onnx_path=str(onnx_p),
+            engine_path=str(engine_p),
+            input_name=prof["input_name"],
+            min_shape=prof["min"],
+            opt_shape=prof["opt"],
+            max_shape=prof["max"],
+            fp16=fp16,
+            workspace_mb=workspace_mb,
+        )
+        logger.info(f"Building DBNet TensorRT engine: {engine_p.name}...")
+        logger.info(f"Command: {' '.join(cmd)}")
+        if not dry_run:
+            subprocess.run(cmd, check=True)
+            logger.info(f"Successfully generated DBNet engine at: {engine_p}")
+        else:
+            logger.info("[Dry Run] Skipped actual engine build execution.")
     else:
-        logger.info("[Dry Run] Skipped actual engine build execution.")
+        # Option B: Use native Python TensorRT builder (no trtexec binary needed)
+        logger.info(f"Building DBNet TensorRT engine via Python API: {engine_p.name}...")
+        build_engine_from_onnx_python(
+            onnx_path=str(onnx_p),
+            engine_path=str(engine_p),
+            input_name=prof["input_name"],
+            min_shape=prof["min"],
+            opt_shape=prof["opt"],
+            max_shape=prof["max"],
+            fp16=fp16,
+            workspace_mb=workspace_mb,
+            dry_run=dry_run,
+        )
 
     return engine_p
 
 
 def build_yolo_engine(
-    trtexec_bin: str,
-    model_type: str,  # 'seg' or 'cls'
-    onnx_path: str,
-    pt_path: Optional[str] = None,
+    trtexec_bin: Optional[str] = None,
+    model_type: str = "seg",
+    onnx_path: str = "weights/onnx/yolo26_seg.onnx",
+    pt_path: str = "weights/yolo/yolo26_seg_best.pt",
     output_dir: str = "weights/tensorrt",
     fp16: bool = True,
     workspace_mb: int = 2048,
     use_ultralytics_export: bool = True,
     dry_run: bool = False,
 ) -> Path:
-    """
-    Build YOLO TensorRT Engine.
-    Can either use native Ultralytics engine exporter or trtexec directly.
-    """
+    """Build YOLO TensorRT Engine via Ultralytics native export or trtexec/Python builder."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     engine_p = out_dir / f"yolo26_{model_type}.engine"
 
-    if use_ultralytics_export and not dry_run:
-        # Check if PyTorch .pt model exists, which allows Ultralytics to export with native TRT NMS plugin
-        source_model = pt_path if (pt_path and Path(pt_path).exists()) else onnx_path
-        if Path(source_model).exists():
-            logger.info(f"Using Ultralytics native TensorRT export on {source_model}...")
-            from ultralytics import YOLO
+    pt_file = Path(pt_path)
+    if use_ultralytics_export and pt_file.exists():
+        logger.info(f"Building YOLO-{model_type} via Ultralytics native TensorRT exporter: {pt_file.name}")
+        cmd = [
+            sys.executable,
+            "-m",
+            "ultralytics",
+            "export",
+            f"model={pt_file}",
+            "format=engine",
+            f"half={fp16}",
+            "dynamic=True",
+            f"workspace={workspace_mb // 1024}",
+        ]
+        logger.info(f"Command: {' '.join(cmd)}")
+        if not dry_run:
+            subprocess.run(cmd, check=True)
+            exported_engine = pt_file.with_suffix(".engine")
+            if exported_engine.exists():
+                shutil.copy(exported_engine, engine_p)
+                logger.info(f"Successfully generated YOLO-{model_type} engine at: {engine_p}")
+        else:
+            logger.info("[Dry Run] Skipped actual engine build execution.")
+        return engine_p
 
-            model = YOLO(source_model)
-            exported = model.export(
-                format="engine",
-                half=fp16,
-                workspace=workspace_mb / 1024.0,
-                dynamic=True,
-                verbose=True,
-            )
-            # Move / copy to target output directory
-            exported_p = Path(exported)
-            if exported_p != engine_p and exported_p.exists():
-                shutil.copy2(exported_p, engine_p)
-            logger.info(f"Successfully generated YOLO-{model_type} TensorRT engine at: {engine_p}")
-            return engine_p
-
-    # Fallback to direct trtexec command
+    # Fallback to ONNX conversion
     onnx_p = Path(onnx_path)
     if not onnx_p.exists():
-        raise FileNotFoundError(f"YOLO-{model_type} ONNX model not found at: {onnx_p}")
+        raise FileNotFoundError(f"Neither PyTorch weights ({pt_path}) nor ONNX model ({onnx_path}) found.")
 
-    prof_key = f"yolo_{model_type}"
-    prof = SHAPE_PROFILES[prof_key]
-    cmd = construct_trtexec_cmd(
-        trtexec_bin=trtexec_bin,
-        onnx_path=str(onnx_p),
-        engine_path=str(engine_p),
-        input_name=prof["input_name"],
-        min_shape=prof["min"],
-        opt_shape=prof["opt"],
-        max_shape=prof["max"],
-        fp16=fp16,
-        workspace_mb=workspace_mb,
-    )
-
-    logger.info(f"Building YOLO-{model_type} TensorRT engine via trtexec: {engine_p.name}...")
-    logger.info(f"Command: {' '.join(cmd)}")
-
-    if not dry_run:
-        res = subprocess.run(cmd, check=True)
-        if res.returncode == 0:
+    prof = SHAPE_PROFILES[f"yolo_{model_type}"]
+    if trtexec_bin:
+        cmd = construct_trtexec_cmd(
+            trtexec_bin=trtexec_bin,
+            onnx_path=str(onnx_p),
+            engine_path=str(engine_p),
+            input_name=prof["input_name"],
+            min_shape=prof["min"],
+            opt_shape=prof["opt"],
+            max_shape=prof["max"],
+            fp16=fp16,
+            workspace_mb=workspace_mb,
+        )
+        logger.info(f"Building YOLO-{model_type} TensorRT engine via trtexec: {engine_p.name}...")
+        logger.info(f"Command: {' '.join(cmd)}")
+        if not dry_run:
+            subprocess.run(cmd, check=True)
             logger.info(f"Successfully generated YOLO-{model_type} engine at: {engine_p}")
+        else:
+            logger.info("[Dry Run] Skipped actual engine build execution.")
     else:
-        logger.info("[Dry Run] Skipped actual engine build execution.")
+        build_engine_from_onnx_python(
+            onnx_path=str(onnx_p),
+            engine_path=str(engine_p),
+            input_name=prof["input_name"],
+            min_shape=prof["min"],
+            opt_shape=prof["opt"],
+            max_shape=prof["max"],
+            fp16=fp16,
+            workspace_mb=workspace_mb,
+            dry_run=dry_run,
+        )
 
     return engine_p
 
@@ -248,7 +387,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Display generated trtexec commands without executing compilation",
+        help="Display generated compilation steps without executing",
     )
     parser.add_argument(
         "--use-yolo-export",
@@ -259,22 +398,27 @@ def main():
     parser.add_argument(
         "--trtexec-path",
         default=None,
-        help="Explicit path to trtexec binary if not automatically discovered",
+        help="Explicit path to trtexec binary if preferred over Python API",
     )
     args = parser.parse_args()
 
     trtexec_bin = args.trtexec_path or find_trtexec()
-    if not trtexec_bin and not args.dry_run:
-        logger.error("Could not find 'trtexec' compiler binary on this system!")
-        logger.error("To install TensorRT on Linux:")
-        logger.error("  uv pip install tensorrt tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs")
-        logger.error("Or specify path explicitly using --trtexec-path=/path/to/trtexec")
+    has_trt_py = False
+    try:
+        import tensorrt as trt
+        has_trt_py = True
+    except ImportError:
+        pass
+
+    if not trtexec_bin and not has_trt_py and not args.dry_run:
+        logger.error("Neither 'trtexec' binary nor Python 'tensorrt' package was found on this system!")
+        logger.error("Please run: uv sync")
         sys.exit(1)
 
-    trtexec_bin = trtexec_bin or "trtexec"
+    backend = f"trtexec ({trtexec_bin})" if trtexec_bin else "Python TensorRT API (tensorrt)"
     logger.info("=" * 60)
     logger.info("Starting NVIDIA TensorRT Engine Compilation Pipeline")
-    logger.info(f"Compiler:    {trtexec_bin}")
+    logger.info(f"Compiler:    {backend}")
     logger.info(f"Target:      {args.model}")
     logger.info(f"Precision:   {'FP16' if args.fp16 else 'FP32'}")
     logger.info(f"Output Dir:  {args.output_dir}")
