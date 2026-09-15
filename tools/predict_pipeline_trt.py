@@ -1,8 +1,11 @@
 """
 High-Performance End-to-End NVIDIA TensorRT CCCD Detection & Segmentation CLI Tool.
-Executes DBNet, YOLO-seg, and YOLO-cls entirely via compiled TensorRT engines (.engine)
-with sub-20ms latency, multi-threaded concurrent inference, colored polygon visualization,
-and JSON output.
+
+Features:
+  - Sub-20ms multi-threaded inference via compiled TensorRT engines (.engine).
+  - High-precision transparent polygon visualization with badge labels.
+  - Comprehensive statistical reporting (P50, P90, P95, P99, StdDev, FPS).
+  - Production JSON payload export adhering to standardized CCCD schema.
 """
 
 import argparse
@@ -11,7 +14,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 # Auto-detect and register NVIDIA CUDA, cuDNN, and TensorRT shared libraries on Linux
 if sys.platform == "linux":
@@ -54,7 +57,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger("PredictPipelineTRT")
 
-CLASS_COLORS: Dict[str, tuple] = {
+# Standardized Color Palette for CCCD Document Semantic Fields (BGR)
+CLASS_COLORS: Dict[str, Tuple[int, int, int]] = {
     "id": (255, 105, 65),          # Royal Blue
     "name": (46, 184, 46),         # Vivid Green
     "dob": (0, 140, 255),          # Vibrant Orange
@@ -71,6 +75,9 @@ CLASS_COLORS: Dict[str, tuple] = {
 }
 
 
+# =============================================================================
+# Section 1: High-Efficiency Visualization Renderer
+# =============================================================================
 def draw_labeled_polygons(
     image: np.ndarray,
     detections: List[Dict[str, Any]],
@@ -79,11 +86,12 @@ def draw_labeled_polygons(
     alpha: float = 0.28,
 ) -> np.ndarray:
     """
-    Draw colored transparent polygon masks with crisp label badges.
+    Render colored transparent polygon masks with crisp label badges in single pass.
     """
     vis_img = image.copy()
     overlay = image.copy()
 
+    # Pass 1: Fill polygon areas on overlay and draw outlines on vis_img
     for d in detections:
         label = d.get("label", "text")
         poly = d.get("polygon", [])
@@ -96,9 +104,10 @@ def draw_labeled_polygons(
         cv2.fillPoly(overlay, [pts], color)
         cv2.polylines(vis_img, [pts], isClosed=True, color=color, thickness=2)
 
-    cv2.addWeighted(overlay, alpha, vis_img, 1 - alpha, 0, vis_img)
+    # Fast alpha blend
+    cv2.addWeighted(overlay, alpha, vis_img, 1.0 - alpha, 0, vis_img)
 
-    # Draw label badges
+    # Pass 2: Render crisp label badges
     for d in detections:
         label = d.get("label", "text")
         conf = d.get("confidence", 0.0)
@@ -112,10 +121,10 @@ def draw_labeled_polygons(
         top_left = pts[top_idx]
         x, y = int(top_left[0]), int(top_left[1])
 
-        text = f"{label} {conf:.2f}"
+        badge_text = f"{label} {conf:.2f}"
         font_scale = 0.45
         thickness = 1
-        (tw, th), baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
 
         badge_y1 = max(0, y - th - 6)
         badge_y2 = y
@@ -125,7 +134,7 @@ def draw_labeled_polygons(
         cv2.rectangle(vis_img, (badge_x1, badge_y1), (badge_x2, badge_y2), color, -1)
         cv2.putText(
             vis_img,
-            text,
+            badge_text,
             (badge_x1 + 3, badge_y2 - 3),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
@@ -134,7 +143,7 @@ def draw_labeled_polygons(
             lineType=cv2.LINE_AA,
         )
 
-    # Draw document header banner
+    # Pass 3: Header banner
     if card_type or title:
         header_text = f"TensorRT Pipeline | Type: {card_type or 'Unknown'}"
         if title:
@@ -154,15 +163,17 @@ def draw_labeled_polygons(
     return vis_img
 
 
+# =============================================================================
+# Section 2: Input Resolution & CLI Parsing
+# =============================================================================
 def collect_image_paths(source: str) -> List[Path]:
     """Collect image paths from file, directory, or pattern."""
     p = Path(source)
     if p.is_file():
         return [p]
     elif p.is_dir():
-        exts = [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".JPG", ".PNG"]
-        files = [f for f in sorted(p.iterdir()) if f.suffix in exts]
-        return files
+        exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".JPG", ".PNG"}
+        return [f for f in sorted(p.iterdir()) if f.suffix in exts]
     else:
         matched = sorted(Path().glob(source))
         if matched:
@@ -171,7 +182,10 @@ def collect_image_paths(source: str) -> List[Path]:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="High-Performance CCCD Detection via NVIDIA TensorRT Engines.")
+    parser = argparse.ArgumentParser(
+        description="High-Performance CCCD Detection via NVIDIA TensorRT Engines (.engine).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("--source", type=str, required=True, help="Path to image file, folder, or glob pattern.")
     parser.add_argument("--engine-dir", type=str, default="weights/tensorrt", help="TensorRT engine directory.")
     parser.add_argument("--dbnet-engine", type=str, default=None, help="Custom DBNet .engine file path.")
@@ -188,6 +202,55 @@ def parse_args():
     return parser.parse_args()
 
 
+# =============================================================================
+# Section 3: Benchmark Statistics Summary Formatter
+# =============================================================================
+def print_benchmark_table(image_count: int, latencies: List[float]) -> Dict[str, float]:
+    """Compute comprehensive statistical metrics and render an aligned ASCII table."""
+    lat_arr = np.array(latencies, dtype=np.float32)
+    mean_lat = float(np.mean(lat_arr))
+    median_lat = float(np.median(lat_arr))
+    p90_lat = float(np.percentile(lat_arr, 90))
+    p95_lat = float(np.percentile(lat_arr, 95))
+    p99_lat = float(np.percentile(lat_arr, 99))
+    min_lat = float(np.min(lat_arr))
+    max_lat = float(np.max(lat_arr))
+    std_lat = float(np.std(lat_arr))
+    fps = 1000.0 / mean_lat if mean_lat > 0 else 0.0
+
+    print("\n" + "+" + "-" * 68 + "+")
+    print("|" + "NVIDIA TensorRT CCCD Pipeline Benchmark Summary".center(68) + "|")
+    print("+" + "-" * 32 + "+" + "-" * 35 + "+")
+    print(f"| {'Metric':<30} | {'Value':<33} |")
+    print("+" + "-" * 32 + "+" + "-" * 35 + "+")
+    print(f"| {'Processed Documents':<30} | {image_count:<33} |")
+    print(f"| {'Mean Latency':<30} | {mean_lat:6.2f} ms                       |")
+    print(f"| {'Median Latency (P50)':<30} | {median_lat:6.2f} ms                       |")
+    print(f"| {'P90 Latency':<30} | {p90_lat:6.2f} ms                       |")
+    print(f"| {'P95 Latency':<30} | {p95_lat:6.2f} ms                       |")
+    print(f"| {'P99 Latency':<30} | {p99_lat:6.2f} ms                       |")
+    print(f"| {'Min / Max Latency':<30} | {min_lat:5.2f} ms / {max_lat:5.2f} ms           |")
+    print(f"| {'Standard Deviation':<30} | {std_lat:6.2f} ms                       |")
+    print(f"| {'Overall Throughput':<30} | {fps:6.1f} FPS                      |")
+    print("+" + "-" * 68 + "+\n")
+
+    return {
+        "total_images": image_count,
+        "mean_latency_ms": round(mean_lat, 2),
+        "median_latency_ms": round(median_lat, 2),
+        "p90_latency_ms": round(p90_lat, 2),
+        "p95_latency_ms": round(p95_lat, 2),
+        "p99_latency_ms": round(p99_lat, 2),
+        "min_latency_ms": round(min_lat, 2),
+        "max_latency_ms": round(max_lat, 2),
+        "std_latency_ms": round(std_lat, 2),
+        "fps": round(fps, 1),
+    }
+
+
+# =============================================================================
+# Section 4: Main Execution Driver
+# =============================================================================
 def main():
     args = parse_args()
     engine_dir = Path(args.engine_dir)
@@ -214,11 +277,10 @@ def main():
         concurrent=not args.sequential,
     )
 
-    # Warmup
+    # Multi-shape GPU Warmup
     if args.warmup > 0:
         pipeline.warmup(num_runs=args.warmup)
 
-    # Create output directories
     if args.save_vis:
         Path(args.save_vis).mkdir(parents=True, exist_ok=True)
 
@@ -241,8 +303,8 @@ def main():
         card_type = res["classification"].get("card_type", "Unknown")
         total_texts = res["total_texts"]
         logger.info(
-            f"[{idx}/{len(image_paths)}] {img_path.name:<25} | "
-            f"Type: {card_type:<18} | Texts: {total_texts:<2} | Latency: {lat:.1f}ms"
+            f"[{idx:>3}/{len(image_paths):<3}] {img_path.name:<25} | "
+            f"Type: {card_type:<16} | Texts: {total_texts:<2} | Latency: {lat:5.1f}ms"
         )
 
         if args.save_vis:
@@ -258,39 +320,15 @@ def main():
 
     pipeline.close()
 
-    # Latency Statistics
-    lat_arr = np.array(latencies)
-    mean_lat = np.mean(lat_arr)
-    median_lat = np.median(lat_arr)
-    p95_lat = np.percentile(lat_arr, 95)
-    min_lat = np.min(lat_arr)
-    max_lat = np.max(lat_arr)
-    fps = 1000.0 / mean_lat if mean_lat > 0 else 0.0
+    # Latency Statistical Benchmark
+    summary_stats = print_benchmark_table(len(image_paths), latencies)
 
-    print("\n" + "=" * 70)
-    print("           NVIDIA TensorRT CCCD Pipeline Benchmark Summary            ")
-    print("=" * 70)
-    print(f"  Processed Images : {len(image_paths)}")
-    print(f"  Mean Latency     : {mean_lat:.2f} ms")
-    print(f"  Median (P50)     : {median_lat:.2f} ms")
-    print(f"  P95 Latency      : {p95_lat:.2f} ms")
-    print(f"  Min / Max Latency: {min_lat:.2f} ms / {max_lat:.2f} ms")
-    print(f"  Throughput (FPS) : {fps:.1f} FPS")
-    print("=" * 70)
-
+    # Save JSON Benchmark Report
     if args.save_json:
         json_out = Path(args.save_json)
         json_out.parent.mkdir(parents=True, exist_ok=True)
         summary_payload = {
-            "summary": {
-                "total_images": len(image_paths),
-                "mean_latency_ms": round(float(mean_lat), 2),
-                "median_latency_ms": round(float(median_lat), 2),
-                "p95_latency_ms": round(float(p95_lat), 2),
-                "min_latency_ms": round(float(min_lat), 2),
-                "max_latency_ms": round(float(max_lat), 2),
-                "fps": round(float(fps), 1),
-            },
+            "summary": summary_stats,
             "results": all_results,
         }
         with open(json_out, "w", encoding="utf-8") as f:
@@ -298,7 +336,7 @@ def main():
         logger.info(f"Saved JSON benchmark results to: {json_out}")
 
     if args.save_vis:
-        logger.info(f"Saved visual annotations to directory: {args.save_vis}")
+        logger.info(f"Saved visual annotations to: {args.save_vis}")
 
 
 if __name__ == "__main__":
