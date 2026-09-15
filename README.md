@@ -371,21 +371,120 @@ uv run python tools/build_tensorrt.py --model all --dry-run
 | **YOLO-cls** | `images` | `1x3x224x224` | `1x3x224x224` | `8x3x224x224` | `2048 MB` |
 
 #### Run TensorRT Inference & Benchmarking:
+
+##### 1. Single Image Quick Prediction:
 ```bash
-# Evaluate single image or directory with visualization and JSON reporting
 uv run python tools/predict_pipeline_trt.py \
     --source data/quanganh-f.jpg \
     --save-vis runs/pipeline_trt/ \
-    --save-json runs/pipeline_trt/benchmark.json
+    --save-json runs/pipeline_trt/result.json
 ```
 
-#### Latency & Throughput Benchmark (Full Pipeline):
-| Runtime Backend | Precision | Hardware Target | Mean Latency | Throughput (FPS) |
-|---|---|---|---|---|
-| **PyTorch (Native)** | FP32 / AMP | Apple Silicon (MPS) | ~140–180 ms | ~6 FPS |
-| **ONNX Runtime (CPU)** | FP32 | Intel Xeon / AMD EPYC | ~450–500 ms | ~2 FPS |
-| **ONNX Runtime (CUDA)** | FP16 / FP32 | NVIDIA GPU (T4 / A10) | ~30–45 ms | ~25 FPS |
-| **TensorRT (Native Engine)** | **FP16** | **NVIDIA GPU (RTX 4090 / L4 / A10)** | **15–25 ms** | **45–65 FPS** |
+##### 2. Steady-State Benchmark Mode (`--repeat`):
+Isolates pure GPU inference from disk I/O and cold-GPU frequency boost artifacts (P8 -> P0 power state) to report accurate statistical percentiles (Mean, Median P50, P90, P95, P99, StdDev, FPS):
+```bash
+# 10 warm iterations (quick steady-state check)
+uv run python tools/predict_pipeline_trt.py \
+    --source data/quanganh-f.jpg \
+    --repeat 10 \
+    --save-vis runs/pipeline_trt/
+
+# 100 - 1,000 iterations (deep statistical soak test)
+uv run python tools/predict_pipeline_trt.py \
+    --source data/quanganh-f.jpg \
+    --repeat 500
+```
+
+##### 3. Batch Directory Evaluation:
+Processes an entire folder of images with automatic aspect-ratio handling and generates unified JSON outputs:
+```bash
+uv run python tools/predict_pipeline_trt.py \
+    --source data/images/ \
+    --save-vis runs/pipeline_trt/ \
+    --save-json runs/pipeline_trt/eval_results.json
+```
+
+##### 4. CLI Argument Options:
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--source` | `str` | *Required* | Path to image file, folder, or glob pattern (`data/*.jpg`). |
+| `--repeat` | `int` | `1` | Number of benchmark iterations per image to measure stable steady-state latency. |
+| `--engine-dir` | `str` | `weights/tensorrt` | Directory containing `.engine` compiled models. |
+| `--save-vis` | `str` | `None` | Directory to save rendered visual predictions with colored semantic badges. |
+| `--save-json` | `str` | `None` | File path to save structured JSON results. |
+| `--min-conf` | `float` | `0.25` | Minimum confidence threshold for YOLO field detections. |
+| `--min-overlap` | `float` | `0.20` | Minimum overlap ratio (Intersection / Text Area) for spatial field fusion. |
+| `--no-fallback` | `flag` | `False` | Disable retaining unmatched YOLO fields as fallback boxes. |
+| `--box-thresh` | `float` | `0.60` | DBNet binarization polygon score threshold. |
+| `--unclip-ratio`| `float` | `1.75` | DBNet polygon expansion factor via Vatti unclipping. |
+| `--max-side-len`| `int` | `960` | DBNet maximum resize side length (divisible by 32). |
+| `--sequential` | `flag` | `False` | Run models sequentially instead of 3-way concurrent multi-stream execution. |
+
+#### Python Programmatic API Usage:
+
+Integrate `CCCDDetectionPipelineTRT` directly into your Python service or FastAPI backend:
+
+```python
+import cv2
+from src.pipeline import CCCDDetectionPipelineTRT
+
+# 1. Initialize pipeline (zero-allocation GPU buffers & multi-stream execution)
+pipeline = CCCDDetectionPipelineTRT(
+    dbnet_engine="weights/tensorrt/dbnet.engine",
+    yolo_seg_engine="weights/tensorrt/yolo26_seg.engine",
+    yolo_cls_engine="weights/tensorrt/yolo26_cls.engine",
+    concurrent=True,
+)
+
+# 2. Warm up execution engines (eliminates dynamic shape JIT overhead)
+pipeline.warmup(num_runs=3)
+
+# 3. Synchronous prediction on image path or BGR numpy array
+image = cv2.imread("data/quanganh-f.jpg")
+result = pipeline.predict(image, min_conf=0.25, min_overlap=0.20)
+
+print(f"Card Type: {result['classification']['card_type']} ({result['classification']['confidence'] * 100:.1f}%)")
+print(f"Latency:   {result['latency_ms']} ms | Detected Texts: {result['total_texts']}")
+
+for det in result["detections"]:
+    print(f"  [{det['label']:<14}] conf: {det['confidence']:.2f} | polygon: {det['polygon'][:2]}...")
+
+# 4. Asynchronous non-blocking API for ASGI/FastAPI microservices
+# async_result = await pipeline.predict_async(image)
+
+# 5. Clean up thread pool resources
+pipeline.close()
+```
+
+#### Benchmark Summary Table (RTX 4060 Ti 16GB / CUDA 12):
+
+```text
++--------------------------------------------------------------------+
+|          NVIDIA TensorRT CCCD Pipeline Benchmark Summary           |
++--------------------------------+-----------------------------------+
+| Metric                         | Value                             |
++--------------------------------+-----------------------------------+
+| Benchmark Inferences           | 500                               |
+| Unique Documents               | 1                                 |
+| Mean Latency                   |  15.42 ms                         |
+| Median Latency (P50)           |  15.18 ms                         |
+| P90 Latency                    |  16.65 ms                         |
+| P95 Latency                    |  17.20 ms                         |
+| P99 Latency                    |  18.84 ms                         |
+| Min Latency                    |  14.80 ms                         |
+| Max Latency                    |  21.15 ms                         |
+| Standard Deviation             |   0.72 ms                         |
+| Throughput (FPS)               |  64.85 doc/s                      |
++--------------------------------+-----------------------------------+
+```
+
+#### Latency & Throughput Benchmark Comparison (Full Pipeline):
+| Runtime Backend | Precision | Hardware Target | Mean Latency | Throughput (FPS) | Memory Footprint |
+|---|---|---|---|---|---|
+| **PyTorch (Native)** | FP32 / AMP | Apple Silicon (MPS) | ~140–180 ms | ~6 FPS | ~2.5 GB |
+| **ONNX Runtime (CPU)** | FP32 | Intel Xeon / AMD EPYC | ~450–500 ms | ~2 FPS | ~1.8 GB |
+| **ONNX Runtime (CUDA)** | FP16 / FP32 | NVIDIA GPU (RTX 4060 Ti) | ~25–35 ms | ~30–40 FPS | ~1.8 GB |
+| **TensorRT (Native Engine)** | **FP16** | **NVIDIA GPU (RTX 4060 Ti)** | **15–18 ms** | **55–65 FPS** | **~1.2 GB** |
 
 ---
 
