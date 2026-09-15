@@ -229,9 +229,18 @@ def build_dbnet_engine(
     output_dir: str = "weights/tensorrt",
     fp16: bool = True,
     workspace_mb: int = 2048,
+    force: bool = False,
     dry_run: bool = False,
 ) -> Path:
     """Build DBNet TensorRT Engine with dynamic spatial and batch profiles."""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    engine_p = out_dir / "dbnet.engine"
+
+    if engine_p.exists() and not force and not dry_run:
+        logger.info(f"DBNet engine already exists at {engine_p}. Skipping (use --force to rebuild).")
+        return engine_p
+
     onnx_p = Path(onnx_path)
     if not onnx_p.exists():
         logger.info(f"DBNet ONNX model not found at {onnx_p}. Exporting now...")
@@ -239,13 +248,8 @@ def build_dbnet_engine(
             from tools.export_onnx import export_dbnet_onnx
             export_dbnet_onnx()
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    engine_p = out_dir / "dbnet.engine"
-
     prof = SHAPE_PROFILES["dbnet"]
 
-    # Option A: If trtexec binary is available, construct command
     if trtexec_bin:
         cmd = construct_trtexec_cmd(
             trtexec_bin=trtexec_bin,
@@ -266,7 +270,6 @@ def build_dbnet_engine(
         else:
             logger.info("[Dry Run] Skipped actual engine build execution.")
     else:
-        # Option B: Use native Python TensorRT builder (no trtexec binary needed)
         logger.info(f"Building DBNet TensorRT engine via Python API: {engine_p.name}...")
         build_engine_from_onnx_python(
             onnx_path=str(onnx_p),
@@ -291,46 +294,53 @@ def build_yolo_engine(
     output_dir: str = "weights/tensorrt",
     fp16: bool = True,
     workspace_mb: int = 2048,
-    use_ultralytics_export: bool = True,
+    force: bool = False,
     dry_run: bool = False,
 ) -> Path:
-    """Build YOLO TensorRT Engine via Ultralytics native export or trtexec/Python builder."""
+    """Build YOLO TensorRT Engine directly from ONNX via Python TensorRT Builder (bypasses ModelOpt)."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     engine_p = out_dir / f"yolo26_{model_type}.engine"
 
+    if engine_p.exists() and not force and not dry_run:
+        logger.info(f"YOLO-{model_type} engine already exists at {engine_p}. Skipping (use --force to rebuild).")
+        return engine_p
+
     pt_file = Path(pt_path)
-    if use_ultralytics_export and pt_file.exists():
-        logger.info(f"Building YOLO-{model_type} via Ultralytics native TensorRT exporter: {pt_file.name}")
+    onnx_candidates = [
+        Path(f"weights/yolo/yolo26_{model_type}_best.onnx"),
+        Path(f"weights/onnx/yolo26_{model_type}.onnx"),
+        Path(onnx_path),
+    ]
+    existing_onnx = next((p for p in onnx_candidates if p.exists()), None)
+
+    # If ONNX does not exist yet but PT exists, export clean ONNX first
+    if not existing_onnx and pt_file.exists():
+        logger.info(f"Exporting YOLO-{model_type} to ONNX: {pt_file.name}")
         if not dry_run:
             from ultralytics import YOLO
             model = YOLO(str(pt_file))
-            exported = model.export(
-                format="engine",
-                half=fp16,
+            exported_onnx = model.export(
+                format="onnx",
                 dynamic=True,
-                workspace=max(1, workspace_mb // 1024),
+                imgsz=640 if model_type == "seg" else 224,
+                half=False,
             )
-            exported_p = Path(exported) if exported else pt_file.with_suffix(".engine")
-            if exported_p.exists():
-                shutil.copy(exported_p, engine_p)
-                logger.info(f"Successfully generated YOLO-{model_type} engine at: {engine_p}")
-            else:
-                raise RuntimeError(f"Ultralytics export finished but {exported_p} was not found.")
+            existing_onnx = Path(exported_onnx)
         else:
-            logger.info(f"[Dry Run] Ultralytics export model={pt_file} format=engine half={fp16} dynamic=True")
-        return engine_p
+            logger.info(f"[Dry Run] Exporting {pt_file} to ONNX")
 
-    # Fallback to ONNX conversion
-    onnx_p = Path(onnx_path)
-    if not onnx_p.exists():
-        raise FileNotFoundError(f"Neither PyTorch weights ({pt_path}) nor ONNX model ({onnx_path}) found.")
+    if not existing_onnx or not existing_onnx.exists():
+        if not dry_run:
+            raise FileNotFoundError(f"Neither PyTorch weights ({pt_path}) nor ONNX model ({onnx_path}) found.")
+        existing_onnx = Path(onnx_path)
 
     prof = SHAPE_PROFILES[f"yolo_{model_type}"]
+
     if trtexec_bin:
         cmd = construct_trtexec_cmd(
             trtexec_bin=trtexec_bin,
-            onnx_path=str(onnx_p),
+            onnx_path=str(existing_onnx),
             engine_path=str(engine_p),
             input_name=prof["input_name"],
             min_shape=prof["min"],
@@ -347,8 +357,9 @@ def build_yolo_engine(
         else:
             logger.info("[Dry Run] Skipped actual engine build execution.")
     else:
+        logger.info(f"Building YOLO-{model_type} TensorRT engine from ONNX ({existing_onnx.name}) via Python API...")
         build_engine_from_onnx_python(
-            onnx_path=str(onnx_p),
+            onnx_path=str(existing_onnx),
             engine_path=str(engine_p),
             input_name=prof["input_name"],
             min_shape=prof["min"],
@@ -393,10 +404,9 @@ def main():
         help="Display generated compilation steps without executing",
     )
     parser.add_argument(
-        "--use-yolo-export",
+        "--force",
         action="store_true",
-        default=True,
-        help="Use Ultralytics native TRT engine exporter for YOLO models (default: True)",
+        help="Force rebuild even if engine already exists",
     )
     parser.add_argument(
         "--trtexec-path",
@@ -435,6 +445,7 @@ def main():
                 output_dir=args.output_dir,
                 fp16=args.fp16,
                 workspace_mb=args.workspace,
+                force=args.force,
                 dry_run=args.dry_run,
             )
 
@@ -447,7 +458,7 @@ def main():
                 output_dir=args.output_dir,
                 fp16=args.fp16,
                 workspace_mb=args.workspace,
-                use_ultralytics_export=args.use_yolo_export,
+                force=args.force,
                 dry_run=args.dry_run,
             )
 
@@ -460,7 +471,7 @@ def main():
                 output_dir=args.output_dir,
                 fp16=args.fp16,
                 workspace_mb=args.workspace,
-                use_ultralytics_export=args.use_yolo_export,
+                force=args.force,
                 dry_run=args.dry_run,
             )
 
