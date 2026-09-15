@@ -481,36 +481,21 @@ class CCCDDetectionPipelineTRT:
     def _run_dbnet(
         self,
         input_tensor: np.ndarray,
-        scale_factors: Tuple[float, float],
         orig_shape: Tuple[int, int],
     ) -> List[Dict[str, Any]]:
         """
         Execute DBNet inference and polygon contour extraction.
         """
         prob_map = self.dbnet_runner.infer(input_tensor)
-
-        # Build prediction dictionary for DBPostProcessor
-        preds = {"maps": prob_map}
-        scale_h, scale_w = scale_factors
         orig_h, orig_w = orig_shape
-        shape_list = [(orig_h, orig_w, scale_h, scale_w)]
 
-        boxes_list, scores_list = self.postprocessor(preds, shape_list)
-
-        text_detections = []
-        if boxes_list and len(boxes_list) > 0:
-            boxes = boxes_list[0]
-            scores = scores_list[0]
-            for poly, score in zip(boxes, scores):
-                if isinstance(poly, np.ndarray):
-                    poly_list = poly.tolist()
-                else:
-                    poly_list = [[float(pt[0]), float(pt[1])] for pt in poly]
-                text_detections.append({
-                    "polygon": poly_list,
-                    "confidence": float(score),
-                })
-        return text_detections
+        # DBPostprocessor directly processes prob_map array and rescales to original image size
+        detections = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
+        if isinstance(detections, list):
+            if len(detections) > 0 and isinstance(detections[0], list):
+                return detections[0]
+            return detections
+        return []
 
     # =========================================================================
     # Section 4: Public Inference API
@@ -523,13 +508,13 @@ class CCCDDetectionPipelineTRT:
         start_time = time.perf_counter()
         img = self._load_image(image)
 
-        input_tensor, scale_factors, orig_shape = self._preprocess_dbnet(img)
+        input_tensor, _, orig_shape = self._preprocess_dbnet(img)
 
         # Multi-thread concurrent execution (overlaps GPU compute kernels)
         if self.concurrent and self.executor is not None:
             fut_cls = self.executor.submit(self._run_yolo_cls, img)
             fut_seg = self.executor.submit(self._run_yolo_seg, img, min_conf)
-            fut_dbnet = self.executor.submit(self._run_dbnet, input_tensor, scale_factors, orig_shape)
+            fut_dbnet = self.executor.submit(self._run_dbnet, input_tensor, orig_shape)
 
             classification = fut_cls.result()
             semantic_boxes = fut_seg.result()
@@ -537,7 +522,7 @@ class CCCDDetectionPipelineTRT:
         else:
             classification = self._run_yolo_cls(img)
             semantic_boxes = self._run_yolo_seg(img, min_conf)
-            text_detections = self._run_dbnet(input_tensor, scale_factors, orig_shape)
+            text_detections = self._run_dbnet(input_tensor, orig_shape)
 
         # Match text bounding polygons to semantic field bounding boxes
         labeled_texts = match_text_to_fields(text_detections, semantic_boxes)
