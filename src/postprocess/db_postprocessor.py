@@ -205,9 +205,7 @@ class DBPostprocessor:
             Unified List of Dicts: [{"label": "text", "confidence": float, "polygon": [[x, y], ...]}, ...]
         """
         if isinstance(preds, dict):
-            prob_maps = preds.get("prob_map", preds.get("maps"))
-            if prob_maps is None:
-                raise KeyError(f"Expected 'prob_map' or 'maps' in preds dict, got: {list(preds.keys())}")
+            prob_maps = preds["prob_map"]
         else:
             prob_maps = preds
 
