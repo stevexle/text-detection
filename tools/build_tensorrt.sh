@@ -41,8 +41,8 @@ fi
 
 if [ -z "$TRTEXEC_BIN" ]; then
     echo -e "${YELLOW}[WARNING] 'trtexec' binary not found on standard paths.${NC}"
-    echo -e "${YELLOW}Attempting to install TensorRT package into .venv...${NC}"
-    uv pip install tensorrt tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs
+    echo -e "${YELLOW}Attempting to install TensorRT CUDA 12 packages into .venv...${NC}"
+    uv pip install tensorrt-cu12 tensorrt-cu12-bindings tensorrt-cu12-libs
     if [ -f ".venv/bin/trtexec" ]; then
         TRTEXEC_BIN=".venv/bin/trtexec"
         echo -e "${GREEN}[OK] Installed and located: $TRTEXEC_BIN${NC}"

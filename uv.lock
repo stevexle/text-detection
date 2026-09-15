@@ -1796,6 +1796,32 @@ wheels = [
 ]
 
 [[package]]
+name = "tensorrt-cu12"
+version = "11.3.0.99"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tensorrt-cu12-bindings", marker = "sys_platform == 'linux'" },
+    { name = "tensorrt-cu12-libs", marker = "sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/69/ba3f7afca36b471a216a878cba2d04a21d5a5e3c5289b6eda30688ae67e9/tensorrt_cu12-11.3.0.99.tar.gz", hash = "sha256:6db43954730b176779e4a2631fb858d1d04e6f4cfdeaecf2ef9eedf89bc71342", size = 17996, upload-time = "2026-09-09T16:24:40.452Z" }
+
+[[package]]
+name = "tensorrt-cu12-bindings"
+version = "11.3.0.99"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/06/26bf6b0cdf75bf16a0cb6586ed0ccfd2706affb613fba442692e32e04f92/tensorrt_cu12_bindings-11.3.0.99-cp310-none-manylinux_2_28_x86_64.whl", hash = "sha256:e6007fb953a6d8f812fb5c54b6927125c5cc15432cda7193a155a9719e7c6021", size = 1259529, upload-time = "2026-09-09T16:25:19.079Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/ab/31195068ad2e89e22ebbf22a2c45ecb202d3400059edab0dca63cc521aa8/tensorrt_cu12_bindings-11.3.0.99-cp311-none-manylinux_2_28_x86_64.whl", hash = "sha256:e26326f856d6753602487065aba7a798a234b6e14b680461465ee99389b286ca", size = 1260587, upload-time = "2026-09-09T16:26:04.045Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/56/b4f03eadbabde7660e9a6a8dbaea2dc584e9ca5a95b4441efb2fd7e58e81/tensorrt_cu12_bindings-11.3.0.99-cp312-none-manylinux_2_28_x86_64.whl", hash = "sha256:26faad20db4f80e9868881d52c8063a2f41ae84b2855007a031711815433cb57", size = 1257701, upload-time = "2026-09-09T16:26:55.064Z" },
+]
+
+[[package]]
+name = "tensorrt-cu12-libs"
+version = "11.3.0.99"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2e/32/fcdd228a7f5b5ac3984d1f21a48fe98a8d5ede1d9051474b3b905d0dd972/tensorrt_cu12_libs-11.3.0.99.tar.gz", hash = "sha256:9ef664972590d67b4dc62f45d0421d364b85964704bcf3aa004d4973df07429e", size = 15503, upload-time = "2026-09-09T16:26:31.131Z" }
+
+[[package]]
 name = "text-detection"
 version = "0.1.0"
 source = { editable = "." }
@@ -1822,6 +1848,9 @@ dependencies = [
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "shapely" },
+    { name = "tensorrt-cu12", marker = "sys_platform == 'linux'" },
+    { name = "tensorrt-cu12-bindings", marker = "sys_platform == 'linux'" },
+    { name = "tensorrt-cu12-libs", marker = "sys_platform == 'linux'" },
     { name = "timm" },
     { name = "torch", version = "2.5.1+cu121", source = { registry = "https://download.pytorch.org/whl/cu121" }, marker = "sys_platform == 'linux'" },
     { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux'" },
@@ -1852,6 +1881,9 @@ requires-dist = [
     { name = "rich", specifier = ">=13.0.0" },
     { name = "scikit-learn", specifier = ">=1.3.0" },
     { name = "shapely", specifier = ">=2.0.0" },
+    { name = "tensorrt-cu12", marker = "sys_platform == 'linux'", specifier = ">=10.0.0" },
+    { name = "tensorrt-cu12-bindings", marker = "sys_platform == 'linux'", specifier = ">=10.0.0" },
+    { name = "tensorrt-cu12-libs", marker = "sys_platform == 'linux'", specifier = ">=10.0.0" },
     { name = "timm", specifier = ">=0.9.0" },
     { name = "torch", marker = "sys_platform != 'linux'", specifier = ">=2.1.0" },
     { name = "torch", marker = "sys_platform == 'linux'", specifier = ">=2.1.0", index = "https://download.pytorch.org/whl/cu121" },
