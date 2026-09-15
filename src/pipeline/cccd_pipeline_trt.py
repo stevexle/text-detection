@@ -139,6 +139,7 @@ class DBNetTensorRTRunner:
         self._cached_shape: Optional[Tuple[int, int, int, int]] = None
         self._gpu_input: Optional[torch.Tensor] = None
         self._gpu_output: Optional[torch.Tensor] = None
+        self._host_pinned: Optional[torch.Tensor] = None
 
         if self.is_engine:
             self._init_tensorrt_engine()
@@ -236,6 +237,10 @@ class DBNetTensorRTRunner:
             self._cached_shape = target_shape
             self._gpu_input = torch.empty(target_shape, dtype=torch.float32, device="cuda")
             self._gpu_output = torch.empty((b, 1, h, w), dtype=torch.float32, device="cuda")
+            try:
+                self._host_pinned = torch.empty(target_shape, dtype=torch.float32, pin_memory=True)
+            except Exception:
+                self._host_pinned = None
 
             # Update dynamic input shape binding in context
             if hasattr(self.context, "set_input_shape"):
@@ -243,11 +248,14 @@ class DBNetTensorRTRunner:
                 self.context.set_tensor_address(self.input_name, self._gpu_input.data_ptr())
                 self.context.set_tensor_address(self.output_name, self._gpu_output.data_ptr())
 
-        # 2. Asynchronous host-to-device copy on dedicated stream
+        # 2. Asynchronous host-to-device copy on dedicated stream via pinned memory
         with torch.cuda.stream(self.stream):
-            # Fast memory copy from host numpy array into pre-allocated GPU buffer
-            host_tensor = torch.from_numpy(input_tensor)
-            self._gpu_input.copy_(host_tensor, non_blocking=True)
+            if self._host_pinned is not None:
+                self._host_pinned.copy_(torch.from_numpy(input_tensor))
+                self._gpu_input.copy_(self._host_pinned, non_blocking=True)
+            else:
+                host_tensor = torch.from_numpy(input_tensor)
+                self._gpu_input.copy_(host_tensor, non_blocking=True)
 
             # 3. Asynchronous TensorRT Execution
             if hasattr(self.context, "execute_async_v3"):
@@ -544,17 +552,27 @@ class CCCDDetectionPipelineTRT:
 
     def _run_dbnet(
         self,
-        input_tensor: np.ndarray,
-        orig_shape: Tuple[int, int],
+        image_or_tensor: Union[np.ndarray, Tuple[np.ndarray, Tuple[int, int]]],
+        orig_shape: Optional[Tuple[int, int]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Execute DBNet inference and polygon contour extraction.
+        Execute DBNet preprocessing, TensorRT inference, and polygon contour extraction.
+        Supports overlapping CPU resize/normalization with concurrent YOLO models.
         """
+        if orig_shape is not None and isinstance(image_or_tensor, np.ndarray) and image_or_tensor.ndim == 4:
+            input_tensor = image_or_tensor
+            shape = orig_shape
+        elif isinstance(image_or_tensor, tuple):
+            input_tensor, shape = image_or_tensor
+        else:
+            orig_h, orig_w = image_or_tensor.shape[:2]
+            shape = (orig_h, orig_w)
+            input_tensor, _, _ = self._preprocess_dbnet(image_or_tensor)
+
         prob_map = self.dbnet_runner.infer(input_tensor)
-        orig_h, orig_w = orig_shape
 
         # DBPostprocessor directly processes prob_map array and rescales to original image size
-        detections = self.postprocessor(prob_map, orig_shape=(orig_h, orig_w))
+        detections = self.postprocessor(prob_map, orig_shape=shape)
         if isinstance(detections, list):
             if len(detections) > 0 and isinstance(detections[0], list):
                 return detections[0]
@@ -578,13 +596,11 @@ class CCCDDetectionPipelineTRT:
         start_time = time.perf_counter()
         img = self._load_image(image)
 
-        input_tensor, _, orig_shape = self._preprocess_dbnet(img)
-
-        # Multi-thread concurrent execution (overlaps GPU compute kernels)
+        # Multi-thread concurrent execution (overlaps GPU compute kernels and CPU preprocessing)
         if self.concurrent and self.executor is not None:
             fut_cls = self.executor.submit(self._run_yolo_cls, img)
             fut_seg = self.executor.submit(self._run_yolo_seg, img, min_conf)
-            fut_dbnet = self.executor.submit(self._run_dbnet, input_tensor, orig_shape)
+            fut_dbnet = self.executor.submit(self._run_dbnet, img)
 
             classification = fut_cls.result()
             semantic_fields = fut_seg.result()
@@ -592,7 +608,7 @@ class CCCDDetectionPipelineTRT:
         else:
             classification = self._run_yolo_cls(img)
             semantic_fields = self._run_yolo_seg(img, min_conf)
-            text_detections = self._run_dbnet(input_tensor, orig_shape)
+            text_detections = self._run_dbnet(img)
 
         # Match text bounding polygons to semantic field polygons
         labeled_texts = match_text_to_fields(
