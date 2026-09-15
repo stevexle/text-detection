@@ -68,6 +68,28 @@ from src.utils.logger import get_logger
 
 logger = get_logger("CCCDPipelineTRT")
 
+# Canonical semantic class names for CCCD classification and field segmentation
+DEFAULT_CLS_NAMES: Dict[int, str] = {
+    0: "back_2021",
+    1: "back_2024",
+    2: "front_2021",
+    3: "front_2024",
+}
+
+DEFAULT_SEG_NAMES: Dict[int, str] = {
+    0: "id",
+    1: "name",
+    2: "dob",
+    3: "gender",
+    4: "nationality",
+    5: "origin_place",
+    6: "current_place",
+    7: "expire_date",
+    8: "issue_date",
+    9: "features",
+    10: "mrz",
+}
+
 
 class ClassificationOutput(TypedDict):
     card_type: str
@@ -299,17 +321,42 @@ class CCCDDetectionPipelineTRT:
         else:
             logger.warning("YOLO-cls model not found. Skipping document classification.")
 
-        # 5. Initialize DBPostProcessor
+        # 5. Resolve Class Names (Restore semantics when engines lack embedded metadata)
+        self.seg_names = self._resolve_class_names(self.yolo_seg, DEFAULT_SEG_NAMES)
+        self.cls_names = self._resolve_class_names(self.yolo_cls, DEFAULT_CLS_NAMES)
+        logger.info(f"Configured YOLO-seg classes: {list(self.seg_names.values())[:5]}... ({len(self.seg_names)} total)")
+        if self.yolo_cls is not None:
+            logger.info(f"Configured YOLO-cls classes: {list(self.cls_names.values())}")
+
+        # 6. Initialize DBPostProcessor
         self.postprocessor = self._init_postprocessor(dbnet_config, dbnet_box_thresh, dbnet_unclip_ratio)
 
-        # 6. Precomputed fast scale and bias for fused ImageNet normalization: (img * scale) + bias
+        # 7. Precomputed fast scale and bias for fused ImageNet normalization: (img * scale) + bias
         mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
         std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
         self.scale = (1.0 / (255.0 * std)).astype(np.float32)
         self.bias = (-mean / std).astype(np.float32)
 
-        # 7. Concurrent Worker Thread Pool
+        # 8. Concurrent Worker Thread Pool
         self.executor = self._init_executor(concurrent, max_workers)
+
+    @staticmethod
+    def _resolve_class_names(model: Optional[YOLO], default_names: Dict[int, str]) -> Dict[int, str]:
+        """
+        Resolve class names dictionary.
+        If YOLO model was loaded from a raw TensorRT engine without embedded metadata,
+        model.names contains generic names like 'class0', 'class1'...
+        In that case, this restores the true semantic labels.
+        """
+        if model is None:
+            return default_names
+        try:
+            m_names = model.names
+            if m_names and not all(str(v).startswith("class") for v in m_names.values()):
+                return {int(k): str(v) for k, v in m_names.items()}
+        except Exception:
+            pass
+        return default_names
 
     @staticmethod
     def _resolve_model_path(*candidates: str, optional: bool = False) -> Optional[str]:
@@ -442,15 +489,16 @@ class CCCDDetectionPipelineTRT:
         if self.yolo_cls is None:
             return {"card_type": "unknown", "confidence": 0.0}
         results = self.yolo_cls(image, imgsz=224, verbose=False)
-        top1_idx = results[0].probs.top1
-        card_type = results[0].names[top1_idx]
+        top1_idx = int(results[0].probs.top1)
+        card_type = self.cls_names.get(top1_idx, str(results[0].names.get(top1_idx, f"class_{top1_idx}")))
         conf = float(results[0].probs.top1conf.cpu().item())
         return {"card_type": card_type, "confidence": round(conf, 4)}
 
     def _run_yolo_seg(self, image: np.ndarray, min_conf: float = 0.25) -> List[Dict[str, Any]]:
         """
         Execute semantic field segmentation.
-        Optimized with max_det=30 and retina_masks=False to avoid generating unused full masks.
+        Extracts segmented polygon masks (or bounding box polygons as fallback)
+        and semantic field labels for spatial matching.
         """
         results = self.yolo_seg(
             image,
@@ -460,22 +508,39 @@ class CCCDDetectionPipelineTRT:
             retina_masks=False,
             verbose=False,
         )
-        boxes_info = []
+        fields = []
         if len(results) > 0 and results[0].boxes is not None:
-            boxes = results[0].boxes
-            names = results[0].names
-            xyxy = boxes.xyxy.cpu().numpy()
-            confs = boxes.conf.cpu().numpy()
+            r = results[0]
+            boxes = r.boxes
             clss = boxes.cls.cpu().numpy().astype(int)
+            confs = boxes.conf.cpu().numpy()
 
-            for i in range(len(xyxy)):
-                cls_id = clss[i]
-                boxes_info.append({
-                    "box": xyxy[i].tolist(),
-                    "label": names[cls_id],
-                    "confidence": float(confs[i]),
+            has_masks = (
+                r.masks is not None
+                and hasattr(r.masks, "xy")
+                and r.masks.xy is not None
+                and len(r.masks.xy) == len(clss)
+            )
+
+            for i in range(len(clss)):
+                cls_id = int(clss[i])
+                label = self.seg_names.get(cls_id, str(r.names.get(cls_id, f"field_{cls_id}")))
+                conf = round(float(confs[i]), 4)
+
+                poly = None
+                if has_masks and len(r.masks.xy[i]) >= 3:
+                    poly = r.masks.xy[i].tolist()
+                else:
+                    # Fallback to 4-point bounding box polygon
+                    x1, y1, x2, y2 = boxes.xyxy[i].cpu().numpy().tolist()
+                    poly = [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+                fields.append({
+                    "label": label,
+                    "confidence": conf,
+                    "polygon": poly,
                 })
-        return boxes_info
+        return fields
 
     def _run_dbnet(
         self,
@@ -499,7 +564,13 @@ class CCCDDetectionPipelineTRT:
     # =========================================================================
     # Section 4: Public Inference API
     # =========================================================================
-    def predict(self, image: Union[str, Path, np.ndarray], min_conf: float = 0.25) -> Dict[str, Any]:
+    def predict(
+        self,
+        image: Union[str, Path, np.ndarray],
+        min_conf: float = 0.25,
+        min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
+    ) -> Dict[str, Any]:
         """
         Synchronous end-to-end inference on a single image.
         Returns unified prediction dictionary with classifications, text polygons, and field labels.
@@ -516,15 +587,20 @@ class CCCDDetectionPipelineTRT:
             fut_dbnet = self.executor.submit(self._run_dbnet, input_tensor, orig_shape)
 
             classification = fut_cls.result()
-            semantic_boxes = fut_seg.result()
+            semantic_fields = fut_seg.result()
             text_detections = fut_dbnet.result()
         else:
             classification = self._run_yolo_cls(img)
-            semantic_boxes = self._run_yolo_seg(img, min_conf)
+            semantic_fields = self._run_yolo_seg(img, min_conf)
             text_detections = self._run_dbnet(input_tensor, orig_shape)
 
-        # Match text bounding polygons to semantic field bounding boxes
-        labeled_texts = match_text_to_fields(text_detections, semantic_boxes)
+        # Match text bounding polygons to semantic field polygons
+        labeled_texts = match_text_to_fields(
+            text_detections=text_detections,
+            field_detections=semantic_fields,
+            min_overlap_ratio=min_overlap,
+            fallback_unmatched_fields=fallback_unmatched,
+        )
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -535,23 +611,38 @@ class CCCDDetectionPipelineTRT:
             "latency_ms": round(elapsed_ms, 2),
         }
 
-    async def predict_async(self, image: Union[str, Path, np.ndarray], min_conf: float = 0.25) -> Dict[str, Any]:
+    async def predict_async(
+        self,
+        image: Union[str, Path, np.ndarray],
+        min_conf: float = 0.25,
+        min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
+    ) -> Dict[str, Any]:
         """
         Asynchronous non-blocking prediction API for high-throughput ASGI microservices.
         """
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.predict, image, min_conf)
+        return await loop.run_in_executor(None, self.predict, image, min_conf, min_overlap, fallback_unmatched)
 
     def predict_batch(
         self,
         images: Sequence[Union[str, Path, np.ndarray]],
         batch_size: int = 1,
         min_conf: float = 0.25,
+        min_overlap: float = 0.20,
+        fallback_unmatched: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Batch prediction API across an iterable of images.
         """
         results = []
         for img in images:
-            results.append(self.predict(img, min_conf=min_conf))
+            results.append(
+                self.predict(
+                    img,
+                    min_conf=min_conf,
+                    min_overlap=min_overlap,
+                    fallback_unmatched=fallback_unmatched,
+                )
+            )
         return results

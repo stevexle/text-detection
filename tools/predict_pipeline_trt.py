@@ -195,6 +195,8 @@ def parse_args():
     parser.add_argument("--save-json", type=str, default=None, help="File path to save JSON prediction results.")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup iterations before timing.")
     parser.add_argument("--min-conf", type=float, default=0.25, help="Minimum confidence threshold for YOLO.")
+    parser.add_argument("--min-overlap", type=float, default=0.20, help="Minimum overlap ratio for field fusion.")
+    parser.add_argument("--no-fallback", action="store_true", help="Disable fallback for unmatched YOLO fields.")
     parser.add_argument("--box-thresh", type=float, default=None, help="DBNet box score threshold.")
     parser.add_argument("--unclip-ratio", type=float, default=None, help="DBNet polygon unclip expansion ratio.")
     parser.add_argument("--max-side-len", type=int, default=960, help="DBNet maximum resize side length.")
@@ -302,7 +304,12 @@ def main():
 
     for r in range(repeat_count):
         for idx, (img_path, raw_bgr) in enumerate(loaded_images, 1):
-            res = pipeline.predict(raw_bgr, min_conf=args.min_conf)
+            res = pipeline.predict(
+                raw_bgr,
+                min_conf=args.min_conf,
+                min_overlap=args.min_overlap,
+                fallback_unmatched=not args.no_fallback,
+            )
             lat = res["latency_ms"]
             latencies.append(lat)
 
